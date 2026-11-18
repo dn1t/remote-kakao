@@ -1,0 +1,9 @@
+Package: fun.tica.rk.ios
+Name: RKClient
+Version: 0.0.1
+Architecture: iphoneos-arm
+Description: iOS remote-kakao client
+Maintainer: David Lee
+Author: David Lee
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000)
