@@ -4,6 +4,8 @@
     "target": "esnext",
     "lib": ["esnext"],
     "types": ["node"],
+    "declaration": true,
+    "sourceMap": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
     "strict": true,
@@ -11,6 +13,7 @@
     "isolatedModules": true,
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "noEmit": true
   }
 }
