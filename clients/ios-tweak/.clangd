@@ -1,0 +1,9 @@
+CompileFlags:
+  Add:
+    - -fobjc-arc
+    - -fvisibility=hidden
+    - -Isrc
+
+Diagnostics:
+  Suppress:
+    - ret_local_block
