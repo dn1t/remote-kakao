@@ -28,7 +28,9 @@ import * as path from "node:path";
 import { parseArgs, styleText } from "node:util";
 
 const INPUT_DIR = ".local";
-const TWEAKS: readonly string[] = [];
+const TWEAKS: readonly string[] = [
+  "clients/ios-tweak/packages/fun.tica.rk.ios_0.0.1_iphoneos-arm64.deb",
+];
 
 class SideloadError extends Error {}
 
@@ -181,32 +183,62 @@ interface BuildOptions {
   outputIpa: string;
   tweaks: string[];
   bundleId: string | null;
-  removeExtensions: boolean;
   profilePath: string;
   entitlementsXml: string;
   identity: string;
 }
 
-function injectTweaks(app: string, { inputIpa, tweaks, bundleId, removeExtensions }: BuildOptions) {
+function runCyan(args: readonly string[], onFail: string): void {
+  const { status, error } = spawnSync("cyan", [...args], { stdio: "inherit" });
+  if (error || status !== 0) die(`cyan failed ${onFail}${error ? `: ${error.message}` : ""}`);
+}
+
+function injectTweaks(app: string, { inputIpa, tweaks, bundleId }: BuildOptions) {
   const args = ["-i", inputIpa, "-o", app, "-u", "--overwrite"];
   if (tweaks.length > 0) args.push("-f", ...tweaks);
   if (bundleId !== null) args.push("-b", bundleId);
-  if (removeExtensions) args.push("-e");
 
   log(`cyan: injecting ${tweaks.length} tweak(s) into ${path.basename(app)}...`);
   fs.mkdirSync(path.dirname(app), { recursive: true });
-  const { status, error } = spawnSync("cyan", args, { stdio: "inherit" });
-  if (error || status !== 0) die(`cyan failed${error ? `: ${error.message}` : ""}`);
+  runCyan(args, `on ${path.basename(app)}`);
   if (!fs.existsSync(app)) die("cyan did not produce an app bundle");
 }
 
-function replaceSigningFiles(app: string, profilePath: string): void {
+// cyan only touches the main binary, so the extension is injected separately
+function injectNotificationExtension(app: string, tweaks: readonly string[]): string | null {
+  const plugins = path.join(app, "PlugIns");
+  if (tweaks.length === 0 || !fs.existsSync(plugins)) return null;
+
+  for (const entry of fs.readdirSync(plugins).sort()) {
+    const appex = path.join(plugins, entry);
+    const pointId =
+      entry.endsWith(".appex") && infoValue(appex, "NSExtension.NSExtensionPointIdentifier");
+    if (pointId !== "com.apple.usernotifications.service") continue;
+
+    // cyan rejects a .appex by extension, so present the bundle as .app for the call
+    const asApp = appex.replace(/\.appex$/, ".app");
+    fs.renameSync(appex, asApp);
+    try {
+      runCyan(["-i", asApp, "-o", asApp, "--overwrite", "-f", ...tweaks], `on ${entry}`);
+    } finally {
+      fs.renameSync(asApp, appex);
+    }
+    log(`injected into ${entry} (notification service)`);
+    return appex;
+  }
+  return null;
+}
+
+function replaceSigningFiles(app: string, profilePath: string, extension: string | null): void {
   for (const entry of fs.readdirSync(app, { recursive: true, withFileTypes: true })) {
     if (entry.name === "_CodeSignature" || entry.name === "embedded.mobileprovision") {
       fs.rmSync(path.join(entry.parentPath, entry.name), { recursive: true, force: true });
     }
   }
-  fs.copyFileSync(profilePath, path.join(app, "embedded.mobileprovision"));
+  const bundles = extension ? [app, extension] : [app];
+  for (const bundle of bundles) {
+    fs.copyFileSync(profilePath, path.join(bundle, "embedded.mobileprovision"));
+  }
 }
 
 function codesign(target: string, identity: string, entitlements: string | null): void {
@@ -237,7 +269,8 @@ function buildIpa(options: BuildOptions): void {
       `version ${infoValue(app, "CFBundleShortVersionString") ?? "(unknown)"}`,
   );
 
-  replaceSigningFiles(app, options.profilePath);
+  const extension = injectNotificationExtension(app, options.tweaks);
+  replaceSigningFiles(app, options.profilePath, extension);
   const entitlements = path.join(work.path, "entitlements.plist");
   fs.writeFileSync(entitlements, options.entitlementsXml);
   log("signing (nested code first)...");
@@ -316,7 +349,6 @@ function main(): void {
     outputIpa,
     tweaks,
     bundleId: args["bundle-id"] ?? null,
-    removeExtensions: false,
     profilePath,
     entitlementsXml: profile.entitlementsXml,
     identity,
