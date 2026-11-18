@@ -14,6 +14,7 @@
     "prepare": "husky",
     "lint": "oxlint --config .config/.oxlintrc.json --no-error-on-unmatched-pattern",
     "fmt": "oxfmt --config .config/.oxfmtrc.json --no-error-on-unmatched-pattern",
+    "build:ios": "cd clients/ios-tweak && make package FINALPACKAGE=1",
     "sideload": "./scripts/sideload.ts"
   },
   "devDependencies": {
