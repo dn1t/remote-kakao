@@ -28,13 +28,6 @@
     "oxlint": "^1.94.0",
     "typescript": "^7.0.2"
   },
-  "lint-staged": {
-    "*.{ts,tsx}": [
-      "pnpm run lint",
-      "pnpm run fmt"
-    ],
-    "*.{json,css,yaml,md}": "pnpm run fmt"
-  },
   "devEngines": {
     "packageManager": {
       "name": "pnpm",

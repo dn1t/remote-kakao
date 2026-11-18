@@ -1,0 +1,5 @@
+{
+  "$schema": "https://json.schemastore.org/lintstagedrc.schema.json",
+  "*.{ts,tsx}": ["pnpm run lint", "pnpm run fmt"],
+  "*.{json,css,yaml,md}": "pnpm run fmt"
+}
