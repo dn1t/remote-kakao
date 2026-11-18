@@ -1,0 +1,1 @@
+commitlint --config .config/.commitlintrc.json --edit $1

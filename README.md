@@ -1,23 +1,44 @@
+> [!WARNING]
+> remote-kakao is under heavy development. APIs may change without notice, and documentation and
+> installation guides are not available yet.
+
 # remote-kakao
 
-A multi-protocol bridge for powerful KakaoTalk bot development. Connect your
-client<sup>Android, iOS and more</sup> to Node.js seamlessly.
+Build KakaoTalk bots in Node.js. remote-kakao relays messages between KakaoTalk and your app, so you can receive and reply to them with a familiar event-driven API.
 
-## Key Features
+## Features (Planned)
 
-- **📡 Multi-Protocol Support**\
-  Choose the optimal communication method for your environment.\
-  Currently supported: **TCP / UDP** (WebSocket & SSE coming soon).
+- **Multiple Transports**: Pick the protocol that suits your environment.
+- **Cross-platform Clients**: Run your bot on Android or Apple devices and drive it from the same Node.js code.
+- **Event-Driven**: Built on Node.js' event model for a familiar and rapid development experience.
 
-- **📱 Platform Agnostic**\
-  Supports a multiple clients, including Android (via MessengerBot R) and
-  iOS/macOS. Standalone Android client, Windows support planned.
+## Support
 
-- **⚡ Seamless Integration**\
-  Built on Node.js's event-driven architecture for a familiar and rapid
-  development experience.
+| Transport          | Status         |
+| ------------------ | -------------- |
+| TCP                | 🚧 In Progress |
+| UDP                | 📋 Planned     |
+| WebSocket          | 📋 Planned     |
+| Server-Sent Events | 📋 Planned     |
 
-## Quickstart
+| Client                       | Status         |
+| ---------------------------- | -------------- |
+| iOS                          | 🚧 In Progress |
+| Android (via MessengerBot R) | 📋 Planned     |
+| Android (standalone)         | 📋 Planned     |
+| macOS                        | 📋 Planned     |
+| Windows                      | 📋 Planned     |
 
-⚠️ **Work In Progress**: remote-kakao is currently under heavy development.
-Detailed documentation and installation guides will be available soon.
+## Development
+
+```sh
+pnpm install   # install dependencies and set up git hooks
+pnpm lint      # lint with oxlint
+pnpm fmt       # format with oxfmt
+```
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org) with the [`@commitlint/config-conventional` rules](https://github.com/conventional-changelog/commitlint/tree/master/%40commitlint/config-conventional#rules). They are checked by commitlint on every commit.
+
+## License
+
+[LGPL-3.0-or-later](LICENSE)

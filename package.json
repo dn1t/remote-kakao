@@ -2,14 +2,34 @@
   "name": "@remote-kakao/monorepo",
   "version": "0.0.0",
   "private": true,
-  "scripts": {
-    "install:ios": "./scripts/install-ios.sh"
-  },
+  "license": "LGPL-3.0-or-later",
   "author": "David Lee <me@tica.fun>",
-  "license": "ISC",
-  "packageManager": "pnpm@10.29.3+sha512.498e1fb4cca5aa06c1dcf2611e6fafc50972ffe7189998c409e90de74566444298ffe43e6cd2acdc775ba1aa7cc5e092a8b7054c811ba8c5770f84693d33d2dc",
-  "dependencies": {},
+  "scripts": {
+    "prepare": "husky",
+    "lint": "oxlint --config .config/.oxlintrc.json --no-error-on-unmatched-pattern",
+    "fmt": "oxfmt --config .config/.oxfmtrc.json --no-error-on-unmatched-pattern"
+  },
   "devDependencies": {
-    "@biomejs/biome": "2.3.15"
-  }
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.6.1",
+    "oxfmt": "^0.79.0",
+    "oxlint": "^1.94.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "pnpm run lint",
+      "pnpm run fmt"
+    ],
+    "*.{json,css,yaml,md}": "pnpm run fmt"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.21.0",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.21.0"
 }
