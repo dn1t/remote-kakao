@@ -16,8 +16,8 @@ Build KakaoTalk bots in Node.js. remote-kakao relays messages between KakaoTalk 
 
 | Transport          | Status         |
 | ------------------ | -------------- |
-| TCP                | 🚧 In Progress |
-| UDP                | 📋 Planned     |
+| UDP                | 🚧 In Progress |
+| TCP                | 📋 Planned     |
 | WebSocket          | 📋 Planned     |
 | Server-Sent Events | 📋 Planned     |
 
