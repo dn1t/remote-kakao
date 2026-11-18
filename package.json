@@ -17,10 +17,12 @@
   "devDependencies": {
     "@commitlint/cli": "^21.2.4",
     "@commitlint/config-conventional": "^21.2.4",
+    "@types/node": "^26.6.6",
     "husky": "^9.1.7",
     "lint-staged": "^17.6.1",
     "oxfmt": "^0.79.0",
-    "oxlint": "^1.94.0"
+    "oxlint": "^1.94.0",
+    "typescript": "^7.0.2"
   },
   "lint-staged": {
     "*.{ts,tsx}": [
