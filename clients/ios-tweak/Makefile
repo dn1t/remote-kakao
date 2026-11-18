@@ -8,8 +8,8 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = RKClient
 
-RKClient_FILES = Tweak.x
-RKClient_CFLAGS = -fobjc-arc
-RKClient_FRAMEWORKS = UIKit
+RKClient_FILES = $(wildcard src/*.x src/*.m)
+RKClient_CFLAGS = -fobjc-arc -fvisibility=hidden -Isrc
+RKClient_FRAMEWORKS = UserNotifications
 
 include $(THEOS_MAKE_PATH)/tweak.mk
