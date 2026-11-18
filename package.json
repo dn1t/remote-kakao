@@ -9,10 +9,12 @@
   ],
   "license": "LGPL-3.0-or-later",
   "author": "David Lee <me@tica.fun>",
+  "type": "module",
   "scripts": {
     "prepare": "husky",
     "lint": "oxlint --config .config/.oxlintrc.json --no-error-on-unmatched-pattern",
-    "fmt": "oxfmt --config .config/.oxfmtrc.json --no-error-on-unmatched-pattern"
+    "fmt": "oxfmt --config .config/.oxfmtrc.json --no-error-on-unmatched-pattern",
+    "sideload": "./scripts/sideload.ts"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.4",
