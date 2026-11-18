@@ -1,0 +1,12 @@
+{
+  "name": "@remote-kakao/core",
+  "version": "3.0.0-alpha.0",
+  "keywords": [
+    "kakaotalk",
+    "kakaotalk-bot",
+    "remote-kakao"
+  ],
+  "license": "LGPL-3.0-or-later",
+  "author": "David Lee <me@tica.fun>",
+  "type": "module"
+}
