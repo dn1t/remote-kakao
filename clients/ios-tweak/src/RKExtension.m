@@ -24,6 +24,10 @@ void RKHookExtension(void) {
                return ^(id self, UNNotificationRequest *req,
                         void (^done)(UNNotificationContent *)) {
                  RKLogRequest(@"NSE", req);
+
+                 ((void (*)(id, SEL, UNNotificationRequest *,
+                            void (^)(UNNotificationContent *)))*orig)(
+                     self, sel, req, done);
                };
              });
 
