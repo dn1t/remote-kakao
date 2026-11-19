@@ -7,7 +7,8 @@
 export const PROTOCOL_VERSION = 1 as const;
 
 /**
- * What a client can do. Extensions use `namespace:name`.\
+ * What a client can do. Extensions use `namespace:name`.
+ *
  * `unverified`: not yet confirmed to work on any client.
  */
 export type Capability =
@@ -27,7 +28,8 @@ export type Capability =
   | `${string}:${string}`;
 
 /**
- * Type of the message.\
+ * Type of the message.
+ *
  * `unverified`: not yet confirmed to work on any client.
  */
 export type MessageType =
@@ -90,3 +92,20 @@ export interface WireMessage {
   quoted?: { id: string; text: string; sender?: WireUser }; // unverified
   raw?: Record<string, unknown>;
 }
+
+/** Binary data carried inside a JSON frame. */
+export interface WireBlob {
+  mime: string;
+  base64: string;
+}
+
+/**
+ * Content to send to a room.
+ * Needs `send.text`, `send.image` or `send.file` respectively.
+ *
+ * `unverified`: not yet confirmed to work on any client.
+ * */
+export type WireContent =
+  | { text: string }
+  | { image: WireBlob; caption?: string } // unverified
+  | { file: WireBlob; name: string }; // unverified
