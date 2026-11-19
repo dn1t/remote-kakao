@@ -1,4 +1,8 @@
-// will move to `@remote-kakao/protocol` later
+/**
+ * Wire protocol v1
+ *
+ * will move to `@remote-kakao/protocol` later
+ */
 
 export const PROTOCOL_VERSION = 1 as const;
 
@@ -17,7 +21,6 @@ export type Capability =
   | "room.members" // unverified
   | "room.history" // unverified
   | "user.avatar"
-  | "message.own" // unverified
   | "message.mentions" // unverified
   | "message.attachments" // unverified
   | "message.quotes" // unverified
@@ -41,3 +44,49 @@ export type MessageType =
   | "unknown";
 
 export type RoomType = "direct" | "group" | "open-direct" | "open-group" | "memo" | "unknown";
+
+/** KakaoTalk user reported by a client. */
+export interface WireUser {
+  id: string;
+  name: string;
+}
+
+/** KakaoTalk account signed in on a client. */
+export interface WireAccount {
+  id: string;
+  me?: WireUser;
+}
+
+/** Chat room reported by a client. */
+export interface WireRoom {
+  id: string;
+  name?: string;
+  type?: RoomType;
+  /** For clients that only know whether a room is a group, not its exact type. */
+  isGroup?: boolean;
+}
+
+/** Metadata of an attachment. The data itself is fetched separately. */
+export interface WireAttachment {
+  type: "photo" | "video" | "audio" | "file" | "emoticon";
+  name?: string;
+  mime?: string;
+  size?: number;
+}
+
+/** Message reported by a client. */
+export interface WireMessage {
+  id: string;
+  room: WireRoom;
+  sender: WireUser;
+  type: MessageType;
+  /** For types other than "text", contains KakaoTalk's preview text (e.g. "사진"). */
+  text: string;
+  /** Epoch ms. */
+  time: number;
+  hasMentions?: boolean;
+  mentions?: WireUser[]; // unverified
+  attachments?: WireAttachment[]; // unverified
+  quoted?: { id: string; text: string; sender?: WireUser }; // unverified
+  raw?: Record<string, unknown>;
+}
