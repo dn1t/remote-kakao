@@ -127,3 +127,56 @@ export type WireContent =
   | { text: string }
   | { image: WireBlob; caption?: string } // unverified
   | { file: WireBlob; name: string }; // unverified
+
+/** Identifies a room */
+interface RoomRef {
+  account: AccountId;
+  room: RoomId;
+}
+
+/**
+ * Requests Node sends to a client, keyed by method name.
+ * Each method is gated by the capability of the same name, except `attachment.fetch`.
+ *
+ * `unverified`: not yet confirmed to work on any client.
+ */
+export interface Methods {
+  "room.send": {
+    /** `quote` is the id of the message to reply to. Needs `send.quote`. */
+    params: RoomRef & { content: WireContent; quote?: MessageId }; // unverified
+    /**
+     * `messageId` is omitted when the client can't tell the id of the sent message.
+     * A successful response means the message was handed to KakaoTalk, not that it was actually sent.
+     */
+    result: { messageId?: MessageId }; // unverified
+  };
+  "room.markRead": { params: RoomRef; result: Record<string, never> };
+  "room.icon": { params: RoomRef; result: { image?: WireBlob } };
+  "room.list": { params: { account: AccountId }; result: { rooms: WireRoom[] } }; // unverified
+  "room.members": { params: RoomRef; result: { users: WireUser[] } }; // unverified
+  "room.history": {
+    /** `before` is a message id. Pages go from newest to oldest. */
+    params: RoomRef & { before?: MessageId; limit: number };
+    result: { messages: WireMessage[] };
+  }; // unverified
+  "user.avatar": { params: { account: AccountId; user: UserId }; result: { image?: WireBlob } };
+  /** Needs `message.attachments`. `index` is the position in `WireMessage.attachments`, starting at 0. */
+  "attachment.fetch": {
+    params: RoomRef & { message: MessageId; index: number };
+    result: { data: WireBlob };
+  }; // unverified
+}
+
+/**
+ * Events the client sends to Node when something happens on the client, such as a new message.
+ * Each key is an event name, and its value is the type of `data` in that event's frame.
+ */
+export interface Events {
+  /** A message arrived. */
+  message: WireMessage;
+}
+
+/** A built-in method, or an extension method named `namespace:name`. */
+export type MethodName = keyof Methods | `${string}:${string}`;
+/** A built-in event, or an extension event named `namespace:name`. */
+export type EventName = keyof Events | `${string}:${string}`;
