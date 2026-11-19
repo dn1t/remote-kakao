@@ -8,11 +8,12 @@ export const PROTOCOL_VERSION = 1 as const;
 
 /**
  * What a client can do. Extensions use `namespace:name`.
+ * `send.*` extend `room.send`; a client without `room.send` is read-only.
  *
  * `unverified`: not yet confirmed to work on any client.
  */
 export type Capability =
-  | "send.text"
+  | "room.send"
   | "send.image" // unverified
   | "send.file" // unverified
   | "send.quote" // unverified
@@ -47,21 +48,38 @@ export type MessageType =
 
 export type RoomType = "direct" | "group" | "open-direct" | "open-group" | "memo" | "unknown";
 
+/** Identifies an account signed in on a client. */
+export type AccountId = string;
+
+/** Identifies a room. Unique within an account. */
+export type RoomId = string;
+
+/**
+ * Identifies a user. Unique within an account.
+ *
+ * The value may be dependent on the client's platform,
+ * so the same user can have different ids on different clients
+ */
+export type UserId = string;
+
+/** Identifies a message. */
+export type MessageId = string;
+
 /** KakaoTalk user reported by a client. */
 export interface WireUser {
-  id: string;
+  id: UserId;
   name: string;
 }
 
 /** KakaoTalk account signed in on a client. */
 export interface WireAccount {
-  id: string;
+  id: AccountId;
   me?: WireUser;
 }
 
 /** Chat room reported by a client. */
 export interface WireRoom {
-  id: string;
+  id: RoomId;
   name?: string;
   type?: RoomType;
   /** For clients that only know whether a room is a group, not its exact type. */
@@ -78,7 +96,7 @@ export interface WireAttachment {
 
 /** Message reported by a client. */
 export interface WireMessage {
-  id: string;
+  id: MessageId;
   room: WireRoom;
   sender: WireUser;
   type: MessageType;
@@ -89,7 +107,7 @@ export interface WireMessage {
   hasMentions?: boolean;
   mentions?: WireUser[]; // unverified
   attachments?: WireAttachment[]; // unverified
-  quoted?: { id: string; text: string; sender?: WireUser }; // unverified
+  quoted?: { id: MessageId; text: string; sender?: WireUser }; // unverified
   raw?: Record<string, unknown>;
 }
 
@@ -101,7 +119,7 @@ export interface WireBlob {
 
 /**
  * Content to send to a room.
- * Needs `send.text`, `send.image` or `send.file` respectively.
+ * Text needs `room.send`. Images and files also need `send.image` or `send.file`.
  *
  * `unverified`: not yet confirmed to work on any client.
  * */
