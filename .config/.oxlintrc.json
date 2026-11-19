@@ -1,11 +1,12 @@
 {
   "$schema": "../node_modules/oxlint/configuration_schema.json",
-  "plugins": ["typescript", "unicorn", "oxc"],
+  "plugins": ["typescript", "unicorn", "oxc", "import"],
   "categories": {
     "correctness": "error"
   },
   "rules": {
-    "typescript/consistent-type-imports": "warn"
+    "typescript/consistent-type-imports": "warn",
+    "import/extensions": ["error", "always"]
   },
   "env": {
     "builtin": true
