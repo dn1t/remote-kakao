@@ -180,3 +180,58 @@ export interface Events {
 export type MethodName = keyof Methods | `${string}:${string}`;
 /** A built-in event, or an extension event named `namespace:name`. */
 export type EventName = keyof Events | `${string}:${string}`;
+
+/** First frame of a session, sent by the client. Describes the client and what it can do. */
+export interface Hello {
+  t: "hello";
+  /** Protocol version */
+  v: number;
+  /** Epoch ms, for replay protection */
+  ts: number;
+  device: { id: string; name: string; platform: string };
+  client: { name: string; version: string };
+  caps: Capability[];
+  accounts: WireAccount[];
+  /** Ms this session can last. Omitted for persistent clients. */
+  budget?: number;
+}
+
+/** Node's answer to a `hello` accepted. */
+export interface Welcome {
+  t: "welcome";
+  v: number;
+  session: string;
+  /** The longest gap (ms) the client may stay silent before sending a `ping`. Only for sessions without a budget. */
+  heartbeat?: number;
+}
+
+/** Node's answer to a `hello` refused. */
+export interface Reject {
+  t: "reject";
+  code: "AUTH_FAILED" | "PROTOCOL_MISMATCH";
+  message: string;
+}
+
+/**
+ * Node has nothing more to send and no listener is still running for this session.
+ * A short-lived client can end the session now instead of waiting out its budget.
+ */
+export interface Idle {
+  t: "idle";
+}
+
+/** Keep-alive for clients without a budget. The receiver answers with `pong`. */
+export interface Ping {
+  t: "ping";
+}
+
+/** Answer to `ping`. */
+export interface Pong {
+  t: "pong";
+}
+
+/** Ends the session. Either side may send it. */
+export interface Bye {
+  t: "bye";
+  reason?: string;
+}
