@@ -10,6 +10,7 @@
     "lint": "oxlint --config .config/.oxlintrc.json --no-error-on-unmatched-pattern",
     "fmt": "oxfmt --config .config/.oxfmtrc.json --no-error-on-unmatched-pattern",
     "build:core": "cd packages/core && tsc",
+    "test:core": "cd packages/core && node --test --test-timeout=5000 \"test/**/*.test.ts\"",
     "build:ios": "cd clients/ios-tweak && make package FINALPACKAGE=1",
     "sideload": "./scripts/sideload.ts"
   },
