@@ -292,3 +292,12 @@ export type ClientErrorCode =
 export type Response =
   | { t: "res"; id: string; ok: true; result: unknown }
   | { t: "res"; id: string; ok: false; error: { code: ClientErrorCode; message: string } };
+
+/** Frames the client sends to Node. */
+export type ClientFrame = Hello | EventFrame | Request | Response | Ping | Pong | Bye;
+
+/** Frames Node sends to the client. */
+export type ServerFrame = Welcome | Reject | Ack | Request | Response | Idle | Ping | Pong | Bye;
+
+/** Any frame, in either direction. */
+export type AnyFrame = ClientFrame | ServerFrame;
