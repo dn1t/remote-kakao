@@ -235,3 +235,60 @@ export interface Bye {
   t: "bye";
   reason?: string;
 }
+
+/** Fields shared by every event frame. `EventFrame` ties `name` to the type of `data`. */
+interface EventFrameOf<N extends EventName, D> {
+  t: "event";
+  /**
+   * Unique per device, even across client restarts (e.g. `<boot id>-<counter>`).
+   * Node drops events whose id it has already handled.
+   * */
+  id: string;
+  name: N;
+  account?: AccountId;
+  data: D;
+  /** Set when the event is being resent after waiting in the outbox. Becomes `msg.replayed` in the exposed API. */
+  replay?: true;
+}
+
+/**
+ * Reports something that happened on the client.
+ * At-least-once: the client keeps it in an outbox until Node acks it, and sends it again if no ack arrives.
+ * Built-in events have a typed `data`; extension events (`namespace:name`) carry `unknown`.
+ */
+export type EventFrame =
+  | { [N in keyof Events]: EventFrameOf<N, Events[N]> }[keyof Events]
+  | EventFrameOf<`${string}:${string}`, unknown>;
+
+/** Node confirms it received these events, so the client can drop them from its outbox. */
+export interface Ack {
+  t: "ack";
+  ids: string[];
+}
+
+/**
+ * Asks the other side to run a method and answer with a `res`.
+ * Node sends built-in methods to the client, and Extension methods (`namespace:name`) are allowed in both directions.
+ */
+export interface Request {
+  t: "req";
+  /** Unique across Node restarts. A repeated id returns the cached response without running again. */
+  id: string;
+  method: MethodName;
+  params: unknown;
+  /** Remaining ms until the caller gives up. Clients should not start work past this point. */
+  ttl: number;
+}
+
+/** Errors a client can answer a request with. */
+export type ClientErrorCode =
+  | "UNSUPPORTED"
+  | "NOT_FOUND"
+  | "UNREACHABLE"
+  | "REJECTED"
+  | "CLIENT_ERROR";
+
+/** Answer to a `req`, matched by `id`. */
+export type Response =
+  | { t: "res"; id: string; ok: true; result: unknown }
+  | { t: "res"; id: string; ok: false; error: { code: ClientErrorCode; message: string } };
