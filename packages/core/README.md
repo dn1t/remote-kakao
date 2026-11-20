@@ -1,3 +1,8 @@
+> [!NOTE]
+> This branch (`next`) contains the upcoming major version of remote-kakao, which has not been
+> released yet. The version currently published to npm can be found on the
+> [`v2`](https://github.com/remote-kakao/core/tree/v2) branch.
+
 > [!WARNING]
 > remote-kakao is under heavy development. APIs may change without notice, and documentation and
 > installation guides are not available yet.
