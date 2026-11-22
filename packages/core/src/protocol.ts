@@ -48,6 +48,9 @@ export type MessageType =
 
 export type RoomType = "direct" | "group" | "open-direct" | "open-group" | "memo" | "unknown";
 
+/** Platform a client runs on. Other strings are allowed for platforms not listed. */
+export type Platform = "android" | "ios" | "macos" | "windows" | (string & Record<never, never>);
+
 /** Identifies a device. Chosen by the client and kept across restarts. */
 export type DeviceId = string;
 
@@ -197,7 +200,7 @@ export interface Hello {
   v: number;
   /** Epoch ms, for replay protection */
   ts: number;
-  device: { id: DeviceId; name: string; platform: string };
+  device: { id: DeviceId; name: string; platform: Platform };
   client: { name: string; version: string };
   caps: Capability[];
   accounts: WireAccount[];
