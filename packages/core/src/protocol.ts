@@ -190,9 +190,9 @@ export interface Events {
 }
 
 /** A built-in method, or an extension method named `namespace:name`. */
-export type MethodName = keyof Methods | `${string}:${string}`;
+export type WireMethodName = keyof Methods | `${string}:${string}`;
 /** A built-in event, or an extension event named `namespace:name`. */
-export type EventName = keyof Events | `${string}:${string}`;
+export type WireEventName = keyof Events | `${string}:${string}`;
 
 /** First frame of a session, sent by the client. Describes the client and what it can do. */
 export interface Hello {
@@ -250,7 +250,7 @@ export interface Bye {
 }
 
 /** Fields shared by every event frame. `EventFrame` ties `name` to the type of `data`. */
-interface EventFrameOf<N extends EventName, D> {
+interface EventFrameOf<N extends WireEventName, D> {
   t: "event";
   /**
    * Unique per device, even across client restarts (e.g. `<boot id>-<counter>`).
@@ -287,7 +287,7 @@ export interface Request {
   t: "req";
   /** Unique across Node restarts. A repeated id returns the cached response without running again. */
   id: RequestId;
-  method: MethodName;
+  method: WireMethodName;
   params: unknown;
   /** Remaining ms until the caller gives up. Clients should not start work past this point. */
   ttl: number;

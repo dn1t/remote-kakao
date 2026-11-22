@@ -7,9 +7,9 @@ import type {
   ClientErrorCode,
   ClientFrame,
   EventFrame,
-  EventName,
+  WireEventName,
   Hello,
-  MethodName,
+  WireMethodName,
   Ping,
   Response,
   ServerFrame,
@@ -181,13 +181,13 @@ describe("Response", () => {
 
 describe("method and event names", () => {
   it("accept built-in and namespaced names only", () => {
-    assert.equal(accept<MethodName>("room.send"), "room.send");
-    assert.equal(accept<MethodName>("kakaolink:send"), "kakaolink:send");
-    assert.equal(accept<EventName>("message"), "message");
-    assert.equal(accept<EventName>("kakaolink:clicked"), "kakaolink:clicked");
+    assert.equal(accept<WireMethodName>("room.send"), "room.send");
+    assert.equal(accept<WireMethodName>("kakaolink:send"), "kakaolink:send");
+    assert.equal(accept<WireEventName>("message"), "message");
+    assert.equal(accept<WireEventName>("kakaolink:clicked"), "kakaolink:clicked");
     // @ts-expect-error neither a built-in method nor namespaced
-    accept<MethodName>("room.unknown");
+    accept<WireMethodName>("room.unknown");
     // @ts-expect-error neither a built-in event nor namespaced
-    accept<EventName>("messages");
+    accept<WireEventName>("messages");
   });
 });
