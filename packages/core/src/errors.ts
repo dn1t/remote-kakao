@@ -1,3 +1,5 @@
+import type { Device } from "./types.ts";
+
 /** Errors thrown from the call that failed. */
 export type RKCallErrorCode =
   | "TIMEOUT"
@@ -29,8 +31,7 @@ const RETRYABLE: ReadonlySet<RKErrorCode> = new Set<RKErrorCode>([
 /** Options for creating an `RKError`. */
 export interface RKErrorOptions {
   cause?: unknown;
-  // TODO: narrow to `Device` once types.ts exists
-  device?: unknown;
+  device?: Device;
   /** Override the default retryability for the code. */
   retryable?: boolean;
 }
@@ -41,8 +42,7 @@ export class RKError extends Error {
   readonly code: RKErrorCode;
   /** The same call may succeed later without changes. */
   readonly retryable: boolean;
-  // TODO: narrow to `Device | undefined` once types.ts exists
-  readonly device: unknown;
+  readonly device: Device | undefined;
 
   constructor(code: RKErrorCode, message: string, options: RKErrorOptions = {}) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });

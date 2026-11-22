@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import type { RKErrorCode } from "../src/errors.ts";
 import { isRKError, RKError } from "../src/errors.ts";
+import type { Device } from "../src/types.ts";
 
 const DEFAULT_RETRYABLE: Record<RKErrorCode, boolean> = {
   TIMEOUT: true,
@@ -62,7 +63,7 @@ describe("RKError", () => {
 
   describe("device", () => {
     it("keeps the given device", () => {
-      const device = { id: "phone" };
+      const device = { id: "phone" } as Device;
 
       assert.equal(new RKError("DEVICE_OFFLINE", "x", { device }).device, device);
     });
