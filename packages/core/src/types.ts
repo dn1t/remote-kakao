@@ -146,3 +146,39 @@ export interface DeviceHello {
   readonly transport: string;
   readonly remoteAddress: string;
 }
+
+/** Content to send to a room: text, or an image or a file given as a `Blob` or bytes. */
+export type Sendable =
+  | string
+  | { readonly text: string }
+  | { readonly image: Blob | Uint8Array; readonly caption?: string } // unverified
+  | { readonly file: Blob | Uint8Array; readonly name: string }; // unverified
+
+/** Result of sending a message. */
+export interface SendResult {
+  /** `undefined` when the client can't tell the id of the sent message. */
+  readonly messageId: MessageId | undefined;
+}
+
+/**
+ * Methods registered by client-side extensions, by name (`namespace:method`).
+ * Add entries by augmenting this interface: `"namespace:method": { params: P; result: R }`.
+ */
+export interface ExtensionMethods {}
+
+/** Names of the extension methods that have been typed. */
+export type ExtensionMethodName = keyof ExtensionMethods & `${string}:${string}`;
+
+/** Parameters of an extension method. */
+export type ExtensionParams<M extends ExtensionMethodName> = ExtensionMethods[M] extends {
+  params: infer P;
+}
+  ? P
+  : never;
+
+/** Result of an extension method. */
+export type ExtensionResult<M extends ExtensionMethodName> = ExtensionMethods[M] extends {
+  result: infer R;
+}
+  ? R
+  : never;
