@@ -1,3 +1,15 @@
+import type {
+  AccountId,
+  Capability,
+  DeviceId,
+  MessageId,
+  MessageType,
+  Platform,
+  RoomId,
+  RoomType,
+  UserId,
+} from "./protocol.ts";
+
 /** Where remote-kakao writes its logs. `console` satisfies. */
 export interface Logger {
   debug(message: string, context?: object): void;
@@ -77,4 +89,60 @@ export interface Link {
   send(frame: Uint8Array): Promise<void>;
   /** Closes the link. `reason` is only informational, e.g. for logs. */
   close(reason?: string): void;
+}
+
+/** User as plain data, which can be serialized as JSON. */
+export interface UserData {
+  id: UserId;
+  name: string;
+}
+
+/** Account as plain data, which can be serialized as JSON. */
+export interface AccountData {
+  id: AccountId;
+  me?: UserData;
+}
+
+/** Room as plain data, which can be serialized as JSON. */
+export interface RoomData {
+  /** Encoded string that identifies the room across restarts. */
+  ref: string;
+  id: RoomId;
+  /** Id of the account the room belongs to. */
+  account: AccountId;
+  /** Id of the device the account is on. */
+  device: DeviceId;
+  name?: string;
+  isGroup?: boolean;
+  type: RoomType;
+}
+
+/** Message as plain data, which can be serialized as JSON. */
+export interface MessageData {
+  id: MessageId;
+  room: RoomData;
+  sender: UserData;
+  type: MessageType;
+  text: string;
+  /** ISO 8601 timestamp. */
+  time: string;
+  hasMentions: boolean;
+  mentions: UserData[];
+  quoted?: { id: MessageId; text: string; sender?: UserData };
+  replayed: boolean;
+}
+
+// TODO: `AuthOptions.verify` is not implemented yet
+/** What a device presents when it connects. Passed to `AuthOptions.verify`. */
+export interface DeviceHello {
+  readonly device: { readonly id: DeviceId; readonly name: string; readonly platform: Platform };
+  readonly client: { readonly name: string; readonly version: string };
+  readonly protocolVersion: number;
+  readonly capabilities: readonly Capability[];
+  readonly accounts: readonly AccountData[];
+  /** Ms the session can last. `undefined` for clients that stay connected. */
+  readonly budget: number | undefined;
+  /** Name of the transport the device connected through. */
+  readonly transport: string;
+  readonly remoteAddress: string;
 }
