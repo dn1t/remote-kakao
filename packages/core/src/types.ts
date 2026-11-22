@@ -1,3 +1,4 @@
+import type { RKError } from "./errors.ts";
 import type {
   AccountId,
   Capability,
@@ -361,3 +362,62 @@ export interface NextMessageOptions extends WaitOptions<Message> {
   /** Only messages from this user, or from the user with this id. */
   from?: User | UserId;
 }
+
+/** Built-in events, with the payload of each. */
+export interface RemoteKakaoEvents {
+  /** A message arrived. This includes messages the client buffered while Node was unreachable. */
+  message: Message;
+  /** A session with a device started. */
+  deviceConnect: Device;
+  /** A session with a device ended. */
+  deviceDisconnect: DeviceDisconnect;
+  /** An error that has no call to be thrown from. If there is no listener, it is logged instead. */
+  error: ErrorReport;
+}
+
+/** Payload of `deviceDisconnect`. */
+export interface DeviceDisconnect {
+  readonly device: Device;
+  /** Why the session ended. `undefined` if either side said goodbye. */
+  readonly error: RKError | undefined;
+}
+
+/** Payload of `error`. */
+export interface ErrorReport {
+  readonly error: unknown;
+  /** Where the error came from. `listener`: a listener threw or rejected. `transport`: a link failed. */
+  readonly source: "listener" | "plugin" | "device" | "transport";
+  /** The event being handled, if the error came from a listener. */
+  readonly event: EventName | undefined;
+  readonly device: Device | undefined;
+}
+
+/**
+ * Events sent by client-side extensions, by name (`namespace:event`).
+ * Add entries by augmenting this interface: `"namespace:event": Data`.
+ */
+export interface ExtensionEvents {}
+
+/** Payload of an extension event. */
+export interface ExtensionEvent<T> {
+  readonly device: Device;
+  /** Account the event belongs to, if any. */
+  readonly account: Account | undefined;
+  readonly data: T;
+}
+
+/** Every event: the built-in ones, and the extension events that have been typed. */
+export type EventMap = RemoteKakaoEvents & {
+  [K in keyof ExtensionEvents as K extends `${string}:${string}` ? K : never]: ExtensionEvent<
+    ExtensionEvents[K]
+  >;
+};
+
+/** Name of a typed event. */
+export type EventName = keyof EventMap & string;
+
+/** Payload of the event `E`. */
+export type EventPayload<E extends EventName> = EventMap[E];
+
+/** Function that receives the payload of the event `E`. */
+export type Listener<E extends EventName> = (payload: EventPayload<E>) => unknown;
