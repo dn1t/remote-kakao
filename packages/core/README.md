@@ -9,12 +9,14 @@
 
 # remote-kakao
 
-Build KakaoTalk bots in Node.js. remote-kakao relays messages between KakaoTalk and your app, so you can receive and reply to them with a familiar event-driven API.
+remote-kakao bridges Node.js and KakaoTalk running on your devices. A client runs alongside or inside the KakaoTalk app and relays messages to and from your Node.js app, which uses the same API whichever platform and transport you choose.
 
 ## Features (Planned)
 
-- **Multiple Transports**: Pick the protocol that suits your environment.
-- **Cross-platform Clients**: Run your bot on Android or Apple devices and drive it from the same Node.js code.
+- **Multiple Clients**: Connect devices running iOS, Android, macOS or Windows. Each device reports what it can do, and calls it can't handle fail before anything is sent.
+- **Multiple Transports**: Pick the transport that suits your network. Your code stays the same whichever you choose.
+- **Reliable Delivery**: Messages that arrive while your app is offline wait on the device and are delivered when it reconnects, flagged so you can tell them apart.
+- **Encrypted by Default**: All traffic is encrypted and authenticated with a token shared by your app and your devices.
 - **Event-Driven**: Built on Node.js' event model for a familiar and rapid development experience.
 
 ## Support
@@ -37,9 +39,10 @@ Build KakaoTalk bots in Node.js. remote-kakao relays messages between KakaoTalk 
 ## Development
 
 ```sh
-pnpm install   # install dependencies and set up git hooks
-pnpm lint      # lint with oxlint
-pnpm fmt       # format with oxfmt
+pnpm install     # install dependencies and set up git hooks
+pnpm lint        # lint with oxlint
+pnpm fmt         # format with oxfmt
+pnpm test:core   # run core tests
 ```
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org) with the [`@commitlint/config-conventional` rules](https://github.com/conventional-changelog/commitlint/tree/master/%40commitlint/config-conventional#rules). They are checked by commitlint on every commit.
