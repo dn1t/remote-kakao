@@ -48,6 +48,9 @@ export type MessageType =
 
 export type RoomType = "direct" | "group" | "open-direct" | "open-group" | "memo" | "unknown";
 
+/** Identifies a device. Chosen by the client and kept across restarts. */
+export type DeviceId = string;
+
 /** Identifies an account signed in on a client. */
 export type AccountId = string;
 
@@ -188,7 +191,7 @@ export interface Hello {
   v: number;
   /** Epoch ms, for replay protection */
   ts: number;
-  device: { id: string; name: string; platform: string };
+  device: { id: DeviceId; name: string; platform: string };
   client: { name: string; version: string };
   caps: Capability[];
   accounts: WireAccount[];
