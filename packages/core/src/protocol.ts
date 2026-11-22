@@ -68,6 +68,12 @@ export type UserId = string;
 /** Identifies a message. */
 export type MessageId = string;
 
+/** Identifies an event. Unique per device, even across client restarts. */
+export type EventId = string;
+
+/** Identifies a request. Unique across Node restarts. */
+export type RequestId = string;
+
 /** KakaoTalk user reported by a client. */
 export interface WireUser {
   id: UserId;
@@ -246,7 +252,7 @@ interface EventFrameOf<N extends EventName, D> {
    * Unique per device, even across client restarts (e.g. `<boot id>-<counter>`).
    * Node drops events whose id it has already handled.
    * */
-  id: string;
+  id: EventId;
   name: N;
   account?: AccountId;
   data: D;
@@ -266,7 +272,7 @@ export type EventFrame =
 /** Node confirms it received these events, so the client can drop them from its outbox. */
 export interface Ack {
   t: "ack";
-  ids: string[];
+  ids: EventId[];
 }
 
 /**
@@ -276,7 +282,7 @@ export interface Ack {
 export interface Request {
   t: "req";
   /** Unique across Node restarts. A repeated id returns the cached response without running again. */
-  id: string;
+  id: RequestId;
   method: MethodName;
   params: unknown;
   /** Remaining ms until the caller gives up. Clients should not start work past this point. */
@@ -293,8 +299,8 @@ export type ClientErrorCode =
 
 /** Answer to a `req`, matched by `id`. */
 export type Response =
-  | { t: "res"; id: string; ok: true; result: unknown }
-  | { t: "res"; id: string; ok: false; error: { code: ClientErrorCode; message: string } };
+  | { t: "res"; id: RequestId; ok: true; result: unknown }
+  | { t: "res"; id: RequestId; ok: false; error: { code: ClientErrorCode; message: string } };
 
 /** Frames the client sends to Node. */
 export type ClientFrame = Hello | EventFrame | Request | Response | Ping | Pong | Bye;
