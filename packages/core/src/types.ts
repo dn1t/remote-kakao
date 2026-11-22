@@ -182,3 +182,182 @@ export type ExtensionResult<M extends ExtensionMethodName> = ExtensionMethods[M]
 }
   ? R
   : never;
+
+/** Device that runs a client. The same object is kept across sessions; `status` follows them. */
+export interface Device {
+  readonly id: DeviceId;
+  /** Human-readable label, e.g. "Galaxy S24". */
+  readonly name: string;
+  readonly platform: Platform;
+  readonly client: { readonly name: string; readonly version: string };
+  /** `online` while a session is open. */
+  readonly status: "online" | "offline";
+  /** Protocol version from the latest handshake. */
+  readonly protocolVersion: number;
+  readonly capabilities: ReadonlySet<Capability>;
+  readonly accounts: readonly Account[];
+  readonly session: DeviceSession | undefined;
+  /** When a session with the device last started or ended. `undefined` if it never connected. */
+  readonly lastSeenAt: Date | undefined;
+
+  /** Whether the device supports the capability. */
+  supports(capability: Capability): boolean;
+  account(id: AccountId): Account | undefined;
+  /** Round-trip time in ms. */
+  ping(options?: RequestOptions): Promise<number>;
+  /** Calls a method registered by a client-side extension. */
+  call<M extends ExtensionMethodName>(
+    method: M,
+    params: ExtensionParams<M>,
+    options?: RequestOptions,
+  ): Promise<ExtensionResult<M>>;
+  /** Ends the current session. Does nothing if there is none. */
+  disconnect(reason?: string): void;
+}
+
+/** Open session of a device. */
+export interface DeviceSession {
+  /** Name of the transport the device is connected through. */
+  readonly transport: string;
+  readonly remoteAddress: string;
+  readonly startedAt: Date;
+  /** When the budget declared by the client runs out. `undefined` for clients that stay connected. */
+  readonly expiresAt: Date | undefined;
+}
+
+/** KakaoTalk account signed in on a device. */
+export interface Account {
+  /** Unique within its device. The format depends on the client, e.g. `<package>/<android user>` on Android, the bundle id on iOS. */
+  readonly id: AccountId;
+  readonly device: Device;
+  /** The user this account is signed in as, if the client can tell. */
+  readonly me: User | undefined;
+
+  /** Room of this account with the given id. Does not ask the device. */
+  room(id: RoomId): Room;
+  /** Requires `room.list`. */
+  rooms(options?: RequestOptions): Promise<Room[]>; // unverified
+}
+
+/** Chat room of an account. */
+export interface Room {
+  /** Encoded string that identifies the room across restarts. Keep it to get the same room again later. */
+  readonly ref: string;
+  readonly id: RoomId;
+  readonly account: Account;
+  readonly device: Device;
+  /** Last known name. `undefined` until the device has described the room. */
+  readonly name: string | undefined;
+  /** Last known value. `undefined` until the device has described the room. */
+  readonly isGroup: boolean | undefined;
+  /** Last known type. `"unknown"` until the device has described the room. */
+  readonly type: RoomType;
+
+  /** Whether the device supports the capability. */
+  supports(capability: Capability): boolean;
+  /**
+   * Requires `room.send`, plus `send.image` or `send.file` for those payloads.
+   * Resolves once the message is handed to KakaoTalk, not once it is delivered.
+   */
+  send(content: Sendable, options?: SendOptions): Promise<SendResult>;
+  /** Requires `room.markRead`. */
+  markRead(options?: RequestOptions): Promise<void>;
+  /** Requires `room.icon`. */
+  icon(options?: RequestOptions): Promise<Blob | undefined>;
+  /** Requires `room.members`. */
+  members(options?: RequestOptions): Promise<User[]>; // unverified
+  /** Requires `room.history`. Newest first. */
+  history(options?: HistoryOptions): Promise<Message[]>; // unverified
+  /** Resolves with the next message in this room. */
+  nextMessage(options?: NextMessageOptions): Promise<Message>;
+  /** Iterates over the messages in this room as they arrive. */
+  messages(options?: IterateOptions<Message>): AsyncIterableIterator<Message>;
+  toJSON(): RoomData;
+}
+
+/** KakaoTalk user. */
+export interface User {
+  readonly id: UserId;
+  readonly name: string;
+  readonly account: Account;
+  /** `true` if this is the user the account is signed in as. */
+  readonly isMe: boolean;
+
+  /** Requires `user.avatar`. */
+  avatar(options?: RequestOptions): Promise<Blob | undefined>;
+  toJSON(): UserData;
+}
+
+/** Immutable snapshot of a message. */
+export interface Message {
+  readonly id: MessageId;
+  readonly room: Room;
+  readonly sender: User;
+  readonly type: MessageType;
+  /** For types other than "text", contains KakaoTalk's preview text (e.g. "사진"). */
+  readonly text: string;
+  readonly time: Date;
+  readonly hasMentions: boolean;
+  /** Mentioned users. Empty without `message.mentions`. */
+  readonly mentions: readonly User[]; // unverified
+  /** Files attached to the message. Empty without `message.attachments`. */
+  readonly attachments: readonly Attachment[]; // unverified
+  /** The message this one quotes. `undefined` without `message.quotes`. */
+  readonly quoted: QuotedMessage | undefined; // unverified
+  /** `true` if the client buffered this message while Node was unreachable. */
+  readonly replayed: boolean;
+  /** Client-specific fields with no portable equivalent. Not covered by semver. */
+  readonly raw: Readonly<Record<string, unknown>>;
+
+  /** Sends to the room of this message. With `{ quote: true }`, sends a KakaoTalk reply to this message. */
+  reply(content: Sendable, options?: ReplyOptions): Promise<SendResult>;
+  /** Marks the room of this message as read. */
+  markRead(options?: RequestOptions): Promise<void>;
+  toJSON(): MessageData;
+}
+
+/** Message that another message quotes. */
+export interface QuotedMessage {
+  // unverified
+  readonly id: MessageId;
+  readonly text: string;
+  readonly sender: User | undefined;
+}
+
+/** File attached to a message. */
+export interface Attachment {
+  // unverified
+  readonly type: "photo" | "video" | "audio" | "file" | "emoticon";
+  readonly name: string | undefined;
+  readonly mimeType: string | undefined;
+  readonly size: number | undefined;
+  /** Downloads the file through the device. */
+  fetch(options?: RequestOptions): Promise<Blob>; // unverified
+}
+
+/** Options for sending a message. */
+export interface SendOptions extends RequestOptions {
+  /** Message to reply to, as a KakaoTalk reply. Requires `send.quote`. */
+  quote?: Message; // unverified
+}
+
+/** Options for replying to a message. */
+export interface ReplyOptions extends RequestOptions {
+  /** Whether to send a KakaoTalk reply to the message. Requires `send.quote`. Default `false`. */
+  quote?: boolean; // unverified
+}
+
+/** Options for reading the history of a room. */
+export interface HistoryOptions extends RequestOptions {
+  // unverified
+  /** Only messages older than this message, or than the message with this id. */
+  before?: Message | MessageId;
+  /** Maximum number of messages. Default `50`. */
+  limit?: number;
+}
+
+/** Options for waiting for the next message of a room. */
+export interface NextMessageOptions extends WaitOptions<Message> {
+  /** Only messages from this user, or from the user with this id. */
+  from?: User | UserId;
+}
