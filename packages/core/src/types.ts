@@ -133,7 +133,6 @@ export interface MessageData {
   replayed: boolean;
 }
 
-// TODO: `AuthOptions.verify` is not implemented yet
 /** What a device presents when it connects. Passed to `AuthOptions.verify`. */
 export interface DeviceHello {
   readonly device: { readonly id: DeviceId; readonly name: string; readonly platform: Platform };
@@ -421,3 +420,37 @@ export type EventPayload<E extends EventName> = EventMap[E];
 
 /** Function that receives the payload of the event `E`. */
 export type Listener<E extends EventName> = (payload: EventPayload<E>) => unknown;
+
+// TODO: `RemoteKakao` is not implemented yet
+/** Options of `RemoteKakao`. */
+export interface RemoteKakaoOptions {
+  /** Transports to listen on. Several can run at once. */
+  transports: readonly Transport[];
+  /** `false` turns off encryption and authentication, for tests and local development. */
+  auth: AuthOptions | false;
+  /** Deadline in ms for every request to a device, unless a call overrides it. Default `30_000`. */
+  requestTimeout?: number;
+  /**
+   * For sessions without a budget.
+   * `interval`: the longest gap (ms) a client may stay silent before sending a `ping`.
+   * `timeout`: ms without any frame after which the session ends.
+   * Default `{ interval: 10_000, timeout: 30_000 }`.
+   */
+  heartbeat?: { interval?: number; timeout?: number };
+  /** Where logs go. Default: warnings and errors to `console`. `false` silences everything. */
+  logger?: Logger | false;
+}
+
+/** Authentication of devices, based on a token shared with them. */
+export interface AuthOptions {
+  /**
+   * Token shared with the devices, or a function that returns the token of a device by its id.
+   * A device without a token is rejected. Frame keys are derived from the token.
+   */
+  token: string | ((deviceId: DeviceId) => string | undefined | Promise<string | undefined>);
+  /**
+   * Extra check once the frames of a device decrypt, e.g. an allow-list.
+   * Return `false` to reject the device with `AUTH_FAILED`. Default: accept.
+   */
+  verify?(hello: DeviceHello): boolean | Promise<boolean>;
+}
