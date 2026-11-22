@@ -316,17 +316,23 @@ export interface Message {
   toJSON(): MessageData;
 }
 
-/** Message that another message quotes. */
+/**
+ * Message that another message quotes.
+ *
+ * `unverified`: not yet confirmed to work on any client.
+ */
 export interface QuotedMessage {
-  // unverified
   readonly id: MessageId;
   readonly text: string;
   readonly sender: User | undefined;
 }
 
-/** File attached to a message. */
+/**
+ * File attached to a message.
+ *
+ * `unverified`: not yet confirmed to work on any client.
+ */
 export interface Attachment {
-  // unverified
   readonly type: "photo" | "video" | "audio" | "file" | "emoticon";
   readonly name: string | undefined;
   readonly mimeType: string | undefined;
@@ -347,9 +353,12 @@ export interface ReplyOptions extends RequestOptions {
   quote?: boolean; // unverified
 }
 
-/** Options for reading the history of a room. */
+/**
+ * Options for reading the history of a room.
+ *
+ * `unverified`: not yet confirmed to work on any client.
+ */
 export interface HistoryOptions extends RequestOptions {
-  // unverified
   /** Only messages older than this message, or than the message with this id. */
   before?: Message | MessageId;
   /** Maximum number of messages. Default `50`. */

@@ -63,8 +63,8 @@ export type RoomId = string; // unverified
 /**
  * Identifies a user. Unique within an account.
  *
- * The value may be dependent on the client's platform,
- * so the same user can have different ids on different clients
+ * The value may depend on the client's platform,
+ * so the same user can have different ids on different clients.
  */
 export type UserId = string;
 
@@ -98,9 +98,12 @@ export interface WireRoom {
   isGroup?: boolean;
 }
 
-/** Metadata of an attachment. The data itself is fetched separately. */
+/**
+ * Metadata of an attachment. The data itself is fetched separately.
+ *
+ * `unverified`: not yet confirmed to work on any client.
+ */
 export interface WireAttachment {
-  // unverified
   type: "photo" | "video" | "audio" | "file" | "emoticon";
   name?: string;
   mime?: string;
@@ -135,7 +138,7 @@ export interface WireBlob {
  * Text needs `room.send`. Images and files also need `send.image` or `send.file`.
  *
  * `unverified`: not yet confirmed to work on any client.
- * */
+ */
 export type WireContent =
   | { text: string }
   | { image: WireBlob; caption?: string } // unverified
@@ -209,7 +212,7 @@ export interface Hello {
   budget?: number;
 }
 
-/** Node's answer to a `hello` accepted. */
+/** Node's answer to an accepted `hello`. */
 export interface Welcome {
   t: "welcome";
   v: number;
@@ -218,7 +221,7 @@ export interface Welcome {
   heartbeat?: number;
 }
 
-/** Node's answer to a `hello` refused. */
+/** Node's answer to a refused `hello`. */
 export interface Reject {
   t: "reject";
   code: "AUTH_FAILED" | "PROTOCOL_MISMATCH";
@@ -255,7 +258,7 @@ interface EventFrameOf<N extends WireEventName, D> {
   /**
    * Unique per device, even across client restarts (e.g. `<boot id>-<counter>`).
    * Node drops events whose id it has already handled.
-   * */
+   */
   id: EventId;
   name: N;
   account?: AccountId;
@@ -281,7 +284,7 @@ export interface Ack {
 
 /**
  * Asks the other side to run a method and answer with a `res`.
- * Node sends built-in methods to the client, and Extension methods (`namespace:name`) are allowed in both directions.
+ * Node sends built-in methods to the client, and extension methods (`namespace:name`) are allowed in both directions.
  */
 export interface Request {
   t: "req";
