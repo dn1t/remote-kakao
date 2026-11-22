@@ -58,7 +58,7 @@ export type DeviceId = string;
 export type AccountId = string;
 
 /** Identifies a room. Unique within an account. */
-export type RoomId = string;
+export type RoomId = string; // unverified
 
 /**
  * Identifies a user. Unique within an account.
@@ -100,6 +100,7 @@ export interface WireRoom {
 
 /** Metadata of an attachment. The data itself is fetched separately. */
 export interface WireAttachment {
+  // unverified
   type: "photo" | "video" | "audio" | "file" | "emoticon";
   name?: string;
   mime?: string;
