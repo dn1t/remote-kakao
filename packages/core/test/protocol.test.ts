@@ -11,7 +11,7 @@ import type {
   Hello,
   WireMethodName,
   Ping,
-  Response,
+  ResponseFrame,
   ServerFrame,
   Welcome,
   WireMessage,
@@ -151,8 +151,8 @@ describe("frame unions", () => {
   });
 });
 
-describe("Response", () => {
-  function outcome(response: Response): string {
+describe("ResponseFrame", () => {
+  function outcome(response: ResponseFrame): string {
     if (response.ok) {
       // @ts-expect-error a successful response has no error
       accept(response.error);

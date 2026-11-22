@@ -286,7 +286,7 @@ export interface Ack {
  * Asks the other side to run a method and answer with a `res`.
  * Node sends built-in methods to the client, and extension methods (`namespace:name`) are allowed in both directions.
  */
-export interface Request {
+export interface RequestFrame {
   t: "req";
   /** Unique across Node restarts. A repeated id returns the cached response without running again. */
   id: RequestId;
@@ -305,15 +305,24 @@ export type ClientErrorCode =
   | "CLIENT_ERROR";
 
 /** Answer to a `req`, matched by `id`. */
-export type Response =
+export type ResponseFrame =
   | { t: "res"; id: RequestId; ok: true; result: unknown }
   | { t: "res"; id: RequestId; ok: false; error: { code: ClientErrorCode; message: string } };
 
 /** Frames the client sends to Node. */
-export type ClientFrame = Hello | EventFrame | Request | Response | Ping | Pong | Bye;
+export type ClientFrame = Hello | EventFrame | RequestFrame | ResponseFrame | Ping | Pong | Bye;
 
 /** Frames Node sends to the client. */
-export type ServerFrame = Welcome | Reject | Ack | Request | Response | Idle | Ping | Pong | Bye;
+export type ServerFrame =
+  | Welcome
+  | Reject
+  | Ack
+  | RequestFrame
+  | ResponseFrame
+  | Idle
+  | Ping
+  | Pong
+  | Bye;
 
 /** Any frame, in either direction. */
 export type AnyFrame = ClientFrame | ServerFrame;
