@@ -55,7 +55,7 @@ export interface IterateOptions<T> {
   filter?: (payload: T) => boolean;
   /** Ends the iteration when aborted. */
   signal?: AbortSignal;
-  /** Payloads buffered while the loop is busy. Oldest are dropped past this (reported via `error`). Default `1000`. */
+  /** Payloads buffered while the loop is busy. Oldest are dropped past this (logged as a warning). Default `1000`. */
   buffer?: number;
 }
 
