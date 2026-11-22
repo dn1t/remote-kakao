@@ -118,6 +118,18 @@ export interface RoomData {
   type: RoomType;
 }
 
+/**
+ * Attachment as plain data, which can be serialized as JSON.
+ *
+ * `unverified`: not yet confirmed to work on any client.
+ */
+export interface AttachmentData {
+  type: "photo" | "video" | "audio" | "file" | "emoticon";
+  name?: string;
+  mimeType?: string;
+  size?: number;
+}
+
 /** Message as plain data, which can be serialized as JSON. */
 export interface MessageData {
   id: MessageId;
@@ -129,6 +141,7 @@ export interface MessageData {
   time: string;
   hasMentions: boolean;
   mentions: UserData[];
+  attachments: AttachmentData[]; // unverified
   quoted?: { id: MessageId; text: string; sender?: UserData };
   replayed: boolean;
 }
