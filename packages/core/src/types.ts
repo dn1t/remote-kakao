@@ -45,3 +45,36 @@ export interface IterateOptions<T> {
   /** Payloads buffered while the loop is busy. Oldest are dropped past this (reported via `error`). Default `1000`. */
   buffer?: number;
 }
+
+/**
+ * Moves sealed frames between the core and devices over a network protocol.
+ * It only carries bytes: handshake, encryption, retries and de-duplication are done by the core.
+ */
+export interface Transport {
+  /** Short name for logs and session info, e.g. "udp". */
+  readonly name: string;
+  /** Starts the transport. Each device connection is passed to `accept` as a `Link`. Resolves once ready. */
+  listen(accept: (link: Link) => void): Promise<TransportHandle>;
+}
+
+/** A running transport, returned by `Transport.listen`. */
+export interface TransportHandle {
+  /** For logs, e.g. "udp://0.0.0.0:3000". */
+  readonly address: string;
+  /** Stops accepting new links. The core closes the existing links before calling. */
+  close(): Promise<void>;
+}
+
+/** Connection to one device. Carries whole sealed frames in both directions. */
+export interface Link {
+  /** Address of the device, for logs and session info. */
+  readonly remoteAddress: string;
+  /** `false` for links like UDP, where frames may be lost or duplicated: the core retransmits frames that go unanswered. */
+  readonly reliable: boolean;
+  /** Frames received from the device. The iteration ends when the link closes normally, and throws if it breaks. */
+  readonly frames: AsyncIterable<Uint8Array>;
+  /** Resolves once the frame is written. Waits while the buffer is full, and rejects if the link is closed. */
+  send(frame: Uint8Array): Promise<void>;
+  /** Closes the link. `reason` is only informational, e.g. for logs. */
+  close(reason?: string): void;
+}
