@@ -12,6 +12,8 @@ import type {
 interface Entry {
   listener: (payload: unknown) => unknown;
   once: boolean;
+  /** Removes the listener, and its abort listener on the signal. */
+  off: () => void;
 }
 
 export interface EmitterHooks {
@@ -70,7 +72,7 @@ export class Emitter {
     const started: Promise<void>[] = [];
     for (const entry of Array.from(entries)) {
       if (!entries.has(entry)) continue; // removed by a listener that ran before it
-      if (entry.once) this.#remove(event, entry);
+      if (entry.once) entry.off();
 
       let result: unknown;
       try {
@@ -253,7 +255,10 @@ export class Emitter {
     this.#closed = true;
     for (const close of Array.from(this.#closers)) close();
     this.#closers.clear();
-    this.#listeners.clear();
+    // Through `off`, so that an emit in progress skips them and no signal keeps them.
+    for (const entries of Array.from(this.#listeners.values())) {
+      for (const entry of Array.from(entries)) entry.off();
+    }
   }
 
   #add(
@@ -262,7 +267,7 @@ export class Emitter {
     once: boolean,
     signal: AbortSignal | undefined,
   ): Unsubscribe {
-    const entry: Entry = { listener, once };
+    const entry: Entry = { listener, once, off: () => {} };
     const entries = this.#listeners.get(event) ?? new Set<Entry>();
     entries.add(entry);
     this.#listeners.set(event, entries);
@@ -271,6 +276,7 @@ export class Emitter {
       this.#remove(event, entry);
       signal?.removeEventListener("abort", off);
     });
+    entry.off = off;
     if (signal?.aborted) off();
     else signal?.addEventListener("abort", off, { once: true });
     return off;

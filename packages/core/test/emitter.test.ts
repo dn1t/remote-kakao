@@ -212,6 +212,16 @@ describe("Emitter, removing a listener", () => {
     assert.equal(emitter.has("error"), false);
   });
 
+  it("removes the abort listener of a once listener after it ran", async () => {
+    const { emitter } = create();
+    const controller = new AbortController();
+    emitter.once("error", () => {}, { signal: controller.signal });
+
+    await emitter.emit("error", report("x"));
+
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  });
+
   it("works for a listener that was added with once", async () => {
     const { emitter } = create();
     let count = 0;
@@ -556,6 +566,30 @@ describe("Emitter, close", () => {
     for (const waiting of [first, second]) {
       await assert.rejects(waiting, (error) => isRKError(error, "CLOSED"));
     }
+  });
+
+  it("stops an emit in progress from calling the listeners after it", async () => {
+    const { emitter } = create();
+    const calls: string[] = [];
+    emitter.on("error", () => {
+      calls.push("closes");
+      emitter.close();
+    });
+    emitter.on("error", () => calls.push("after close"));
+
+    await emitter.emit("error", report("x"));
+
+    assert.deepEqual(calls, ["closes"]);
+  });
+
+  it("removes the abort listeners of the listeners it removes", () => {
+    const { emitter } = create();
+    const controller = new AbortController();
+    emitter.on("error", () => {}, { signal: controller.signal });
+
+    emitter.close();
+
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
   });
 
   it("rejects every wait that starts afterwards", async () => {
