@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { decodeRef } from "./convert.ts";
 import type { DeviceContext, SessionKeys } from "./device.ts";
-import { DeviceState, SessionState } from "./device.ts";
+import { DeviceState, SessionState, timeoutError } from "./device.ts";
 import { Emitter } from "./emitter.ts";
 import type { MessageStream } from "./entities.ts";
 import { AppInstanceImpl, MessageImpl, UserImpl } from "./entities.ts";
@@ -49,7 +49,12 @@ import { wireMessageProblem } from "./wire-message.ts";
 interface Connection {
   device: DeviceState;
   session: SessionState;
+  /** Tells that a frame arrived, which keeps a session without a budget from timing out. */
+  touch(): void;
 }
+
+/** How long, in ms, a link may stay open without a hello that starts a session. */
+const HELLO_TIMEOUT = 15_000;
 
 /**
  * The main class of remote-kakao: a server that devices running a KakaoTalk client connect to.
@@ -59,7 +64,7 @@ interface Connection {
  * and make other requests to them.
  * Devices connect over the transports given in the options.
  */
-export class RemoteKakao {
+export class RemoteKakao implements AsyncDisposable {
   readonly #options: ResolvedOptions;
   readonly #emitter: Emitter;
   readonly #reportError: (report: ErrorReport) => void;
@@ -75,7 +80,12 @@ export class RemoteKakao {
   readonly #tokenOf: TokenLookup | undefined;
   readonly #saltCache = new SaltCache(SALT_TTL);
   readonly #handles: TransportHandle[] = [];
+  /** Links that are open. */
+  readonly #links = new Set<Link>();
+  /** The reading of each open link, which ends with the link. */
+  readonly #readers = new Set<Promise<void>>();
   #listening = false;
+  #closing: Promise<void> | undefined;
 
   /** Throws if the options are invalid. */
   constructor(options: RemoteKakaoOptions) {
@@ -122,14 +132,16 @@ export class RemoteKakao {
    * If a transport fails to start, the ones started before it are stopped, and this rejects.
    * Does nothing if it is already listening.
    */
-  async listen(): Promise<void> {
+  async listen(options?: { signal?: AbortSignal }): Promise<void> {
+    if (this.#closing !== undefined) throw new RKError("CLOSED", "RemoteKakao is closed");
     if (this.#listening) return;
+    options?.signal?.throwIfAborted();
     this.#listening = true;
 
     const opened: TransportHandle[] = [];
     try {
       for (const transport of this.#options.transports) {
-        const handle = await transport.listen((link) => void this.#acceptLink(transport, link));
+        const handle = await transport.listen((link) => this.#accept(transport, link));
         opened.push(handle);
         this.#options.logger.info(`listening on ${handle.address}`);
       }
@@ -139,6 +151,47 @@ export class RemoteKakao {
       throw error;
     }
     this.#handles.push(...opened);
+    options?.signal?.addEventListener("abort", () => void this.close(), { once: true });
+  }
+
+  /**
+   * Stops listening and ends every session. Does nothing if it was already called.
+   *
+   * Devices are told goodbye, and their pending requests are rejected with `CLOSED`.
+   * Listeners that are still running get `timeout` ms (default: `requestTimeout`) to finish.
+   * Afterwards the events are closed: `wait` rejects with `CLOSED` and no listener is called.
+   */
+  close(options?: { timeout?: number }): Promise<void> {
+    const timeout = options?.timeout ?? this.#options.requestTimeout;
+    const invalid = timeoutError(timeout, "timeout");
+    if (invalid) return Promise.reject(invalid);
+    this.#closing ??= this.#shutDown(timeout);
+    return this.#closing;
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.close();
+  }
+
+  async #shutDown(timeout: number): Promise<void> {
+    await Promise.allSettled(this.#handles.map((handle) => handle.close()));
+    // A device is told goodbye first. The other links have no session to end.
+    const sessionLinks = new Set<Link>();
+    for (const device of this.#devices.values()) {
+      if (device.session !== undefined) sessionLinks.add(device.session.link);
+      device.disconnect("server closing");
+    }
+    for (const link of this.#links) {
+      if (!sessionLinks.has(link)) link.close("closed");
+    }
+    // Once the links have ended, `deviceDisconnect` has been emitted for every session.
+    await within(timeout, Promise.allSettled(this.#readers));
+    for (const link of this.#links) link.close("closed");
+
+    const closed = new RKError("CLOSED", "RemoteKakao is closed");
+    for (const device of this.#devices.values()) device.rejectAll(closed);
+    await within(timeout, this.#emitter.settle());
+    this.#emitter.close();
   }
 
   /** Calls `listener` every time the event happens. */
@@ -183,11 +236,34 @@ export class RemoteKakao {
     return this.#ensureAppInstance(device, location.appInstance).room(location.room);
   }
 
-  /** Reads the frames of a link until it ends. The first one has to be a hello. */
+  /** Starts reading a link a transport hands over. */
+  #accept(transport: Transport, link: Link): void {
+    if (this.#closing !== undefined) {
+      link.close("closed");
+      return;
+    }
+    this.#links.add(link);
+    const reader = this.#acceptLink(transport, link).finally(() => {
+      this.#links.delete(link);
+      this.#readers.delete(reader);
+    });
+    this.#readers.add(reader);
+  }
+
+  /**
+   * Reads the frames of a link until it ends. The first one has to be a hello, and has to come in time.
+   * A device that has said hello is watched, so that its session ends when its budget runs out
+   * or, without a budget, when it goes quiet for too long.
+   */
   async #acceptLink(transport: Transport, link: Link): Promise<void> {
     const { logger } = this.#options;
     let connection: Connection | undefined;
     let failure: RKError | undefined;
+    const helloTimer = setTimeout(() => {
+      logger.warn("closing link: no hello in time");
+      link.close("hello timeout");
+    }, HELLO_TIMEOUT);
+    helloTimer.unref();
     try {
       for await (const raw of link.frames) {
         if (connection?.session.ended) break;
@@ -203,12 +279,14 @@ export class RemoteKakao {
         }
 
         const { frame } = result.incoming;
+        connection?.touch();
         if (connection === undefined) {
           if (frame.t !== "hello") {
             logger.warn("closing link: expected hello");
             link.close("PROTOCOL_ERROR");
             break;
           }
+          clearTimeout(helloTimer);
           connection = await this.#acceptHello(
             transport,
             link,
@@ -230,6 +308,7 @@ export class RemoteKakao {
         device: connection?.device,
       });
     } finally {
+      clearTimeout(helloTimer);
       if (connection !== undefined)
         this.#endSession(connection.device, connection.session, failure);
     }
@@ -287,9 +366,41 @@ export class RemoteKakao {
       ...(hello.budget === undefined ? { heartbeat: heartbeat.interval } : {}),
     });
     device.attachSession(session);
+    const connection = { device, session, touch: this.#watch(device, session) };
     void this.#emitter.emit("deviceConnect", device);
     this.#maybeIdle(device);
-    return { device, session };
+    return connection;
+  }
+
+  /**
+   * Ends the session when its budget runs out, or, if it has none, when no frame arrives for
+   * `heartbeat.timeout` ms. Returns the function that tells that a frame arrived.
+   */
+  #watch(device: DeviceState, session: SessionState): () => void {
+    const { heartbeat } = this.#options;
+    const watchdog = (ms: number, expire: () => void) => {
+      let timer = setTimeout(expire, ms);
+      timer.unref();
+      session.onEnd(() => clearTimeout(timer));
+      return () => {
+        clearTimeout(timer);
+        timer = setTimeout(expire, ms);
+        timer.unref();
+      };
+    };
+
+    if (session.expiresAt !== undefined) {
+      watchdog(session.expiresAt.getTime() - Date.now(), () => {
+        this.#endSession(device, session, undefined);
+        session.link.close("budget expired");
+      });
+      return () => {};
+    }
+    return watchdog(heartbeat.timeout, () => {
+      const error = new RKError("TIMEOUT", `no frame from the device for ${heartbeat.timeout} ms`);
+      this.#endSession(device, session, error);
+      session.link.close("heartbeat timeout");
+    });
   }
 
   /** Acts on a frame the device sent while its session is open. */
@@ -475,5 +586,19 @@ async function sendReject(
     await link.send(bytes);
   } catch {
     // The link is about to be closed anyway.
+  }
+}
+
+/** Resolves when the promise does, or after `ms`, whichever comes first. */
+async function within(ms: number, promise: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
+  try {
+    await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }
