@@ -174,7 +174,8 @@ const FRAME_TYPES: Record<AnyFrame["t"], true> = {
   res: true,
 };
 
-const utf8 = new TextDecoder("utf-8", { fatal: true });
+// `ignoreBOM` keeps a leading U+FEFF, so a device id reads back exactly as it was written.
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 function view(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);

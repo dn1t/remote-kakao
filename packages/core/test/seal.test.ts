@@ -291,6 +291,11 @@ describe("peekHeader", () => {
     assert.equal(peekHeader(badDirection), undefined);
   });
 
+  it("keeps a byte order mark at the start of the device id", () => {
+    assert.equal(peekHeader(plain(PING, "\uFEFFphone"))?.device, "\uFEFFphone");
+    assert.equal(openFrame(seal(PING, { device: "\uFEFFphone" }), KEY)?.device, "\uFEFFphone");
+  });
+
   it("returns undefined for a device id that is not UTF-8", () => {
     const bytes = Buffer.from([0x00, Direction.Up, 0x01, 0xff, 0x7b, 0x7d]);
 
