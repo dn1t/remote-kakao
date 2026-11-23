@@ -67,3 +67,6 @@ export const settled = (promise: Promise<unknown>) =>
     (value) => ({ value }),
     (error: unknown) => ({ error }),
   );
+
+/** Waits until the promises that can settle right now have run. */
+export const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
