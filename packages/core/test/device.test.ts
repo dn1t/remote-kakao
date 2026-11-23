@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { afterEach, describe, it, mock } from "node:test";
 
 import type { SessionKeys } from "../src/device.ts";
-import { SessionState } from "../src/device.ts";
-import { isRKError } from "../src/errors.ts";
-import type { AnyFrame } from "../src/protocol.ts";
+import { DeviceState, SessionState } from "../src/device.ts";
+import type { DeviceContext } from "../src/device.ts";
+import { isRKError, RKError } from "../src/errors.ts";
+import type { AnyFrame, RequestFrame } from "../src/protocol.ts";
 import { deriveKey, Direction, openFrame } from "../src/seal.ts";
-import type { Link } from "../src/types.ts";
+import type { AppInstance, Link } from "../src/types.ts";
 
 const SALT = Buffer.from("000102030405060708090a0b0c0d0e0f", "hex");
 const KEYS: SessionKeys = {
@@ -263,6 +265,626 @@ describe("SessionState", () => {
       session.end();
 
       assert.equal(session.ended, true);
+    });
+  });
+});
+
+/** A device whose context records the calls it gets. */
+function newDevice(options: { requestTimeout?: number } = {}) {
+  let nextId = 1;
+  const pendingChanges: number[] = [];
+  const errors: unknown[] = [];
+  const ctx: DeviceContext = {
+    requestTimeout: options.requestTimeout ?? 30_000,
+    nextRequestId: () => `r${nextId++}`,
+    onPendingChange: (device) => pendingChanges.push(device.pendingCount),
+    reportDeviceError: (_device, error) => errors.push(error),
+  };
+  const device = new DeviceState(
+    { id: "phone", name: "Phone", platform: "ios", client: { name: "test", version: "1" } },
+    ctx,
+  );
+  return { device, pendingChanges, errors };
+}
+
+/**
+ * Plain session (no keys) over a fake link. `reliable: false` makes the core retransmit.
+ * `sent()` returns the requests written to the link so far.
+ */
+function plainSession(reliable = true) {
+  const link = { ...fakeLink(), reliable };
+  const session = newSession({ keys: undefined, link });
+  const sent = () =>
+    link.written
+      .map((bytes) => openFrame(bytes)?.frame)
+      .filter((f) => f?.t === "req") as RequestFrame[];
+  return { session, link, sent };
+}
+
+const settled = (promise: Promise<unknown>) =>
+  promise.then(
+    (value) => ({ value }),
+    (error: unknown) => ({ error }),
+  );
+
+describe("DeviceState", () => {
+  afterEach(() => mock.timers.reset());
+
+  describe("status and info", () => {
+    it("is offline until a session is attached, and after it is detached", () => {
+      const { device } = newDevice();
+      const { session } = plainSession();
+      assert.equal(device.status, "offline");
+      assert.equal(device.lastSeenAt, undefined);
+
+      device.attachSession(session);
+      assert.equal(device.status, "online");
+      assert.equal(device.session, session);
+      assert.ok(device.lastSeenAt);
+
+      device.detachSession(session);
+      assert.equal(device.status, "offline");
+      assert.equal(device.session, undefined);
+    });
+
+    it("tells what it supports and finds app instances by id", () => {
+      const { device } = newDevice();
+      device.capabilities.add("room.send");
+      const appInstance = { id: "kakao" } as AppInstance;
+      device.appInstances = [appInstance];
+
+      assert.equal(device.supports("room.send"), true);
+      assert.equal(device.supports("room.icon"), false);
+      assert.equal(device.appInstance("kakao"), appInstance);
+      assert.equal(device.appInstance("other"), undefined);
+    });
+  });
+
+  describe("request", () => {
+    it("writes the request to the open session and resolves with the result", async () => {
+      const { device } = newDevice();
+      const { session, sent } = plainSession();
+      device.attachSession(session);
+
+      const request = device.request("room.markRead", { appInstance: "a", room: "r" });
+      await Promise.resolve();
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: { done: 1 } });
+
+      assert.deepEqual(await request, { done: 1 });
+      assert.deepEqual(sent(), [
+        {
+          t: "req",
+          id: "r1",
+          method: "room.markRead",
+          params: { appInstance: "a", room: "r" },
+          ttl: 30_000,
+        },
+      ]);
+    });
+
+    it("sends an extension method the same way", async () => {
+      const { device } = newDevice();
+      const { session, sent } = plainSession();
+      device.attachSession(session);
+
+      const request = device.extensionRequest("x:y", { a: 1 });
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: 7 });
+
+      assert.equal(await request, 7);
+      assert.equal(sent()[0]?.method, "x:y");
+    });
+
+    it("holds the request until a session is attached, with the time left as ttl", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+      const { session, sent } = plainSession();
+
+      const request = device.extensionRequest("x:y", null, { timeout: 10_000 });
+      assert.equal(device.pendingCount, 1);
+      mock.timers.tick(4000);
+      device.attachSession(session);
+      assert.deepEqual(
+        sent().map((frame) => [frame.id, frame.ttl]),
+        [["r1", 6000]],
+      );
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: "ok" });
+
+      assert.equal(await request, "ok");
+      assert.equal(device.pendingCount, 0);
+    });
+
+    it("answers a client error with its code and message", async () => {
+      const { device } = newDevice();
+      device.attachSession(plainSession().session);
+
+      const request = device.extensionRequest("x:y", null);
+      device.handleResponse({
+        t: "res",
+        id: "r1",
+        ok: false,
+        error: { code: "NOT_FOUND", message: "no such room" },
+      });
+
+      await assert.rejects(request, (error) => {
+        assert.ok(isRKError(error, "NOT_FOUND"));
+        assert.equal(error.message, "no such room");
+        assert.equal(error.device, device);
+        return true;
+      });
+    });
+
+    it("reads an unknown error code as CLIENT_ERROR", async () => {
+      const { device } = newDevice();
+      device.attachSession(plainSession().session);
+
+      const request = device.extensionRequest("x:y", null);
+      device.handleResponse({
+        t: "res",
+        id: "r1",
+        ok: false,
+        error: { code: "WEIRD" as "NOT_FOUND", message: "boom" },
+      });
+
+      await assert.rejects(request, (error) => isRKError(error, "CLIENT_ERROR"));
+    });
+
+    it("ignores a response to an unknown or already answered request", async () => {
+      const { device } = newDevice();
+      device.attachSession(plainSession().session);
+
+      const request = device.extensionRequest("x:y", null);
+      device.handleResponse({ t: "res", id: "nope", ok: true, result: 1 });
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: 2 });
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: 3 });
+
+      assert.equal(await request, 2);
+    });
+
+    it("reports a failed write instead of rejecting the request", async () => {
+      const { device, errors } = newDevice();
+      const { session, link } = plainSession();
+      device.attachSession(session);
+      link.failNext.push(new Error("closed"));
+
+      const request = settled(device.extensionRequest("x:y", null));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.deepEqual(
+        errors.map((error) => (error as Error).message),
+        ["closed"],
+      );
+      device.rejectAll(new RKError("CLOSED", "closed"));
+      await request;
+    });
+
+    it("tells the context whenever a request is added or settled", async () => {
+      const { device, pendingChanges } = newDevice();
+      device.attachSession(plainSession().session);
+
+      const request = device.extensionRequest("x:y", null);
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: 1 });
+      await request;
+
+      assert.equal(pendingChanges.at(-1), 0);
+      assert.ok(pendingChanges.includes(1));
+    });
+  });
+
+  describe("deadline", () => {
+    it("rejects with TIMEOUT when a request that was sent goes unanswered", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+      device.attachSession(plainSession().session);
+
+      const request = settled(device.extensionRequest("x:y", null, { timeout: 500 }));
+      mock.timers.tick(500);
+
+      const { error } = (await request) as { error: unknown };
+      assert.ok(isRKError(error, "TIMEOUT"));
+      assert.equal(error.retryable, true);
+      assert.equal(device.pendingCount, 0);
+    });
+
+    it("rejects with DEVICE_OFFLINE when it never found a session", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+
+      const request = settled(device.extensionRequest("x:y", null, { timeout: 500 }));
+      mock.timers.tick(500);
+
+      const { error } = (await request) as { error: unknown };
+      assert.ok(isRKError(error, "DEVICE_OFFLINE"));
+      assert.equal(device.pendingCount, 0);
+    });
+
+    it("uses the requestTimeout of the context by default", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice({ requestTimeout: 200 });
+
+      const request = settled(device.extensionRequest("x:y", null));
+      mock.timers.tick(199);
+      assert.equal(device.pendingCount, 1);
+      mock.timers.tick(1);
+
+      assert.ok(isRKError(((await request) as { error: unknown }).error, "DEVICE_OFFLINE"));
+    });
+
+    for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31]) {
+      it(`rejects with a RangeError for the timeout ${timeout}`, async () => {
+        const { device } = newDevice();
+
+        await assert.rejects(device.extensionRequest("x:y", null, { timeout }), RangeError);
+
+        assert.equal(device.pendingCount, 0);
+      });
+    }
+
+    it("accepts the longest timeout setTimeout takes", async () => {
+      const { device } = newDevice();
+      const request = device.extensionRequest("x:y", null, { timeout: 2 ** 31 - 1 });
+      device.rejectAll(new RKError("CLOSED", "closed"));
+
+      await assert.rejects(request, (error) => isRKError(error, "CLOSED"));
+    });
+
+    it("leaves no timer running once a request is settled", async () => {
+      const before = timers();
+      const { device } = newDevice();
+      device.attachSession(plainSession(false).session);
+
+      const request = device.extensionRequest("x:y", null, { timeout: 60_000 });
+      assert.ok(timers() > before);
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: 1 });
+      await request;
+
+      assert.equal(timers(), before);
+    });
+  });
+
+  describe("abort", () => {
+    it("rejects at once with ABORTED when the signal is already aborted", async () => {
+      const { device } = newDevice();
+      const controller = new AbortController();
+      const reason = new Error("stop");
+      controller.abort(reason);
+
+      await assert.rejects(
+        device.extensionRequest("x:y", null, { signal: controller.signal }),
+        (error) => isRKError(error, "ABORTED") && error.cause === reason,
+      );
+      assert.equal(device.pendingCount, 0);
+    });
+
+    it("rejects with ABORTED when the signal aborts while waiting, and stops listening", async () => {
+      const { device } = newDevice();
+      device.attachSession(plainSession().session);
+      const controller = new AbortController();
+
+      const request = device.extensionRequest("x:y", null, { signal: controller.signal });
+      assert.equal(getEventListeners(controller.signal, "abort").length, 1);
+      controller.abort();
+
+      await assert.rejects(request, (error) => isRKError(error, "ABORTED"));
+      assert.equal(device.pendingCount, 0);
+    });
+
+    it("stops listening to the signal once the request is answered", async () => {
+      const { device } = newDevice();
+      device.attachSession(plainSession().session);
+      const controller = new AbortController();
+
+      const request = device.extensionRequest("x:y", null, { signal: controller.signal });
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: 1 });
+      await request;
+
+      assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    });
+  });
+
+  describe("retransmission", () => {
+    it("writes the request again at 2, 6, 14 and 30 s on a link that loses frames, then stops", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+      const { session, sent } = plainSession(false);
+      device.attachSession(session);
+
+      const request = settled(device.extensionRequest("x:y", null, { timeout: 100_000 }));
+      const counts: number[] = [];
+      for (const at of [1999, 2000, 5999, 6000, 13_999, 14_000, 29_999, 30_000, 99_000]) {
+        mock.timers.tick(at - Date.now());
+        await Promise.resolve();
+        counts.push(sent().length);
+      }
+
+      assert.deepEqual(counts, [1, 2, 2, 3, 3, 4, 4, 5, 5]);
+      device.rejectAll(new RKError("CLOSED", "closed"));
+      await request;
+    });
+
+    it("sends the time left as ttl each time", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+      const { session, sent } = plainSession(false);
+      device.attachSession(session);
+
+      const request = settled(device.extensionRequest("x:y", null, { timeout: 10_000 }));
+      mock.timers.tick(2000);
+      await Promise.resolve();
+
+      assert.deepEqual(
+        sent().map((frame) => frame.ttl),
+        [10_000, 8000],
+      );
+      device.rejectAll(new RKError("CLOSED", "closed"));
+      await request;
+    });
+
+    it("does not write again on a reliable link", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+      const { session, sent } = plainSession(true);
+      device.attachSession(session);
+
+      const request = settled(device.extensionRequest("x:y", null, { timeout: 100_000 }));
+      mock.timers.tick(60_000);
+
+      assert.equal(sent().length, 1);
+      device.rejectAll(new RKError("CLOSED", "closed"));
+      await request;
+    });
+
+    it("does not retry when the deadline comes before the next retry", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+      const { session, sent } = plainSession(false);
+      device.attachSession(session);
+
+      const request = settled(device.extensionRequest("x:y", null, { timeout: 1500 }));
+      mock.timers.tick(1500);
+      await request;
+
+      assert.equal(sent().length, 1);
+    });
+
+    it("starts the retransmission over in the next session", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+      const first = plainSession(false);
+      const second = plainSession(false);
+      device.attachSession(first.session);
+
+      const request = settled(device.extensionRequest("x:y", null, { timeout: 100_000 }));
+      mock.timers.tick(2000);
+      device.detachSession(first.session);
+      device.attachSession(second.session);
+      const counts: number[] = [];
+      for (const after of [1999, 1, 3999, 1]) {
+        mock.timers.tick(after);
+        await Promise.resolve();
+        counts.push(second.sent().length);
+      }
+
+      assert.deepEqual(counts, [1, 2, 2, 3]);
+      device.rejectAll(new RKError("CLOSED", "closed"));
+      await request;
+    });
+
+    it("leaves no retransmission timer running after a detach, or when none would fit", async () => {
+      const before = timers();
+      const { device } = newDevice();
+      const { session } = plainSession(false);
+      device.attachSession(session);
+
+      const short = settled(device.extensionRequest("x:y", null, { timeout: 1500 }));
+      assert.equal(timers(), before + 1);
+      device.rejectAll(new RKError("CLOSED", "closed"));
+      await short;
+      const long = settled(device.extensionRequest("x:y", null, { timeout: 60_000 }));
+      assert.equal(timers(), before + 2);
+      device.detachSession(session);
+
+      assert.equal(timers(), before + 1);
+      device.rejectAll(new RKError("CLOSED", "closed"));
+      await long;
+      assert.equal(timers(), before);
+    });
+
+    it("stops writing once the request is answered", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+      const { session, sent } = plainSession(false);
+      device.attachSession(session);
+
+      const request = device.extensionRequest("x:y", null, { timeout: 100_000 });
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: 1 });
+      await request;
+      mock.timers.tick(60_000);
+
+      assert.equal(sent().length, 1);
+    });
+  });
+
+  describe("sessions", () => {
+    it("writes an unanswered request again, with the same id, to the next session", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+      const first = plainSession(false);
+      const second = plainSession();
+      device.attachSession(first.session);
+
+      const request = device.extensionRequest("x:y", null, { timeout: 100_000 });
+      device.detachSession(first.session);
+      assert.equal(device.pendingCount, 1);
+      mock.timers.tick(10_000);
+      device.attachSession(second.session);
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: "late" });
+
+      assert.equal(await request, "late");
+      assert.deepEqual(
+        second.sent().map((frame) => [frame.id, frame.ttl]),
+        [["r1", 90_000]],
+      );
+    });
+
+    it("stops retransmitting to a session that was detached", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+      const { device } = newDevice();
+      const { session, sent } = plainSession(false);
+      device.attachSession(session);
+
+      const request = settled(device.extensionRequest("x:y", null, { timeout: 100_000 }));
+      device.detachSession(session);
+      mock.timers.tick(60_000);
+
+      assert.equal(sent().length, 1);
+      device.rejectAll(new RKError("CLOSED", "closed"));
+      await request;
+    });
+
+    it("moves the unanswered requests to a new session that replaces the old one", async () => {
+      const { device } = newDevice();
+      const first = plainSession();
+      const second = plainSession();
+      device.attachSession(first.session);
+      const request = settled(device.extensionRequest("x:y", null));
+
+      device.attachSession(second.session);
+
+      assert.equal(first.session.ended, true);
+      assert.deepEqual(
+        second.sent().map((frame) => frame.id),
+        ["r1"],
+      );
+      assert.equal(device.session, second.session);
+      device.rejectAll(new RKError("CLOSED", "closed"));
+      await request;
+    });
+
+    it("only ends a session that is no longer the current one", () => {
+      const { device } = newDevice();
+      const first = plainSession();
+      const second = plainSession();
+      device.attachSession(first.session);
+      device.attachSession(second.session);
+
+      device.detachSession(first.session);
+
+      assert.equal(device.session, second.session);
+      assert.equal(device.status, "online");
+    });
+
+    it("rejects every request, queued or not, with the given error", async () => {
+      const { device } = newDevice();
+      const sentOne = device.extensionRequest("x:y", null);
+      device.attachSession(plainSession().session);
+      const sentTwo = device.extensionRequest("x:y", null);
+      const error = new RKError("CLOSED", "closing");
+
+      device.rejectAll(error);
+
+      await assert.rejects(sentOne, (e) => e === error);
+      await assert.rejects(sentTwo, (e) => e === error);
+      assert.equal(device.pendingCount, 0);
+    });
+  });
+
+  describe("ping", () => {
+    it("rejects with DEVICE_OFFLINE without a session", async () => {
+      const { device } = newDevice();
+
+      await assert.rejects(device.ping(), (error) => isRKError(error, "DEVICE_OFFLINE"));
+    });
+
+    it("resolves with the round-trip time once the pong arrives", async () => {
+      const { device } = newDevice();
+      const { session } = plainSession();
+      device.attachSession(session);
+
+      const ping = device.ping();
+      session.resolvePing();
+
+      assert.equal(typeof (await ping), "number");
+    });
+
+    it("rejects with TIMEOUT, naming the device, when no pong arrives", async () => {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      const { device } = newDevice();
+      device.attachSession(plainSession().session);
+
+      const ping = assert.rejects(device.ping({ timeout: 100 }), (error) => {
+        assert.ok(isRKError(error, "TIMEOUT"));
+        assert.equal(error.device, device);
+        return true;
+      });
+      mock.timers.tick(100);
+
+      await ping;
+    });
+
+    it("rejects with a RangeError for a timeout setTimeout can't take", async () => {
+      const { device } = newDevice();
+      device.attachSession(plainSession().session);
+
+      await assert.rejects(device.ping({ timeout: 2 ** 31 }), RangeError);
+    });
+  });
+
+  describe("call", () => {
+    it("sends an extension request", async () => {
+      const { device } = newDevice();
+      const { session, sent } = plainSession();
+      device.attachSession(session);
+
+      const call = device.call("x:y" as never, { a: 1 } as never);
+      device.handleResponse({ t: "res", id: "r1", ok: true, result: "done" });
+
+      assert.equal(await call, "done");
+      assert.equal(sent()[0]?.method, "x:y");
+    });
+  });
+
+  describe("disconnect", () => {
+    it("sends bye with the reason, then closes the link", async () => {
+      const { device } = newDevice();
+      const { session, link } = plainSession();
+      const closed: Array<string | undefined> = [];
+      link.close = (reason) => closed.push(reason);
+      device.attachSession(session);
+
+      device.disconnect("maintenance");
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.deepEqual(openFrame(link.written[0]!)?.frame, { t: "bye", reason: "maintenance" });
+      assert.deepEqual(closed, ["maintenance"]);
+    });
+
+    it("sends bye without a reason when none is given", async () => {
+      const { device } = newDevice();
+      const { session, link } = plainSession();
+      device.attachSession(session);
+
+      device.disconnect();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.deepEqual(openFrame(link.written[0]!)?.frame, { t: "bye" });
+    });
+
+    it("closes the link even when bye can't be written, without an unhandled rejection", async () => {
+      const { device } = newDevice();
+      const { session, link } = plainSession();
+      let closed = false;
+      link.close = () => (closed = true);
+      link.failNext.push(new Error("closed"));
+      device.attachSession(session);
+
+      device.disconnect("x");
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.equal(closed, true);
+    });
+
+    it("does nothing without a session", () => {
+      assert.doesNotThrow(() => newDevice().device.disconnect("x"));
     });
   });
 });
