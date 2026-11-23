@@ -4,11 +4,13 @@ import type {
   Capability,
   ClientErrorCode,
   DeviceId,
+  EventId,
   Methods,
   Platform,
   RequestFrame,
   RequestId,
   ResponseFrame,
+  RoomId,
   ServerFrame,
   WireMethodName,
 } from "./protocol.ts";
@@ -181,6 +183,9 @@ const CLIENT_ERROR_CODES: ReadonlySet<string> = new Set<ClientErrorCode>([
 const RETRANSMIT_BASE = 2000;
 const RETRANSMIT_MAX = 4;
 
+/** How many event ids a device remembers to drop events that arrive twice. */
+export const MAX_SEEN_EVENTS = 4096;
+
 /** The longest delay `setTimeout` accepts. A longer one is cut to 1 ms. */
 const MAX_TIMEOUT = 2 ** 31 - 1;
 
@@ -246,6 +251,10 @@ export class DeviceState implements Device {
   readonly #pending = new Map<RequestId, RequestRecord>();
   /** Requests with no session to be written to. */
   readonly #queue: RequestRecord[] = [];
+  /** For each room with sends in progress, the promise of its last send. */
+  readonly #roomTails = new Map<string, Promise<void>>();
+  /** Ids of the latest events, oldest first. */
+  readonly #seenEvents = new Set<EventId>();
 
   constructor(init: DeviceInit, ctx: DeviceContext) {
     this.id = init.id;
@@ -461,6 +470,39 @@ export class DeviceState implements Device {
     for (const record of [...this.#pending.values(), ...this.#queue]) {
       this.#settle(record, () => record.reject(error));
     }
+  }
+
+  /**
+   * Makes sends to the same room run one at a time, in the order `chainRoomSend` was called.
+   * `run` starts when the previous send has settled, even if it failed.
+   * The caller doesn't need to await the previous send to keep the order.
+   */
+  chainRoomSend<T>(appInstance: AppInstanceId, room: RoomId, run: () => Promise<T>): Promise<T> {
+    const key = JSON.stringify([appInstance, room]);
+    const result = (this.#roomTails.get(key) ?? Promise.resolve()).then(run);
+    const tail: Promise<void> = result
+      .then(
+        () => {},
+        () => {},
+      )
+      .then(() => {
+        if (this.#roomTails.get(key) === tail) this.#roomTails.delete(key);
+      });
+    this.#roomTails.set(key, tail);
+    return result;
+  }
+
+  /**
+   * Whether the event is new. A client resends an event until it is acked, so the same id can arrive more than once.
+   * The ids of the last `MAX_SEEN_EVENTS` events are kept.
+   */
+  acceptEvent(id: EventId): boolean {
+    if (this.#seenEvents.has(id)) return false;
+    this.#seenEvents.add(id);
+    if (this.#seenEvents.size > MAX_SEEN_EVENTS) {
+      this.#seenEvents.delete(this.#seenEvents.values().next().value!);
+    }
+    return true;
   }
 
   #settle(record: RequestRecord, run: () => void): void {
