@@ -462,7 +462,7 @@ export interface RemoteKakaoOptions {
    * For sessions without a budget.
    * `interval`: the longest gap (ms) a client may stay silent before sending a `ping`.
    * `timeout`: ms without any frame after which the session ends.
-   * Default `{ interval: 10_000, timeout: 30_000 }`.
+   * Default `{ interval: 10_000, timeout: 3 * interval }`. The timeout must be longer than the interval.
    */
   heartbeat?: { interval?: number; timeout?: number };
   /** Where logs go. Default: warnings and errors to `console`. `false` silences everything. */
