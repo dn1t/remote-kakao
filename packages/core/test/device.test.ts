@@ -4,10 +4,11 @@ import { afterEach, describe, it, mock } from "node:test";
 
 import type { SessionKeys } from "../src/device.ts";
 import { MAX_SEEN_EVENTS, SessionState } from "../src/device.ts";
+import type { AppInstanceImpl } from "../src/entities.ts";
 import { isRKError, RKError } from "../src/errors.ts";
 import type { AnyFrame } from "../src/protocol.ts";
 import { deriveKey, Direction, openFrame } from "../src/seal.ts";
-import type { AppInstance, Link } from "../src/types.ts";
+import type { Link } from "../src/types.ts";
 import { fakeLink, newDevice, plainSession, settled } from "./fakes.ts";
 
 const SALT = Buffer.from("000102030405060708090a0b0c0d0e0f", "hex");
@@ -274,7 +275,7 @@ describe("DeviceState", () => {
       const { device } = newDevice();
       assert.equal(device.described, false);
       device.capabilities.add("room.send");
-      const appInstance = { id: "kakao" } as AppInstance;
+      const appInstance = { id: "kakao" } as AppInstanceImpl;
       device.appInstances = [appInstance];
 
       assert.equal(device.supports("room.send"), true);

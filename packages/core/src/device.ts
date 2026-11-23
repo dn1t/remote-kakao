@@ -1,3 +1,4 @@
+import type { AppInstanceImpl } from "./entities.ts";
 import { RKError } from "./errors.ts";
 import type {
   AppInstanceId,
@@ -17,7 +18,6 @@ import type {
 import { ReplayWindow } from "./replay-window.ts";
 import { Direction, sealFrame } from "./seal.ts";
 import type {
-  AppInstance,
   Device,
   DeviceSession,
   ExtensionMethodName,
@@ -242,7 +242,7 @@ export class DeviceState implements Device {
   described = false;
   readonly capabilities = new Set<Capability>();
   /** App instances from the latest handshake. */
-  appInstances: readonly AppInstance[] = [];
+  appInstances: readonly AppInstanceImpl[] = [];
   /** The open session, if any. */
   session: SessionState | undefined;
   /** When a session with the device last started or ended. */
@@ -279,7 +279,7 @@ export class DeviceState implements Device {
     return this.capabilities.has(capability);
   }
 
-  appInstance(id: AppInstanceId): AppInstance | undefined {
+  appInstance(id: AppInstanceId): AppInstanceImpl | undefined {
     return this.appInstances.find((appInstance) => appInstance.id === id);
   }
 
