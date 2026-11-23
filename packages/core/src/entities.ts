@@ -8,16 +8,31 @@ import type {
   RoomId,
   RoomType,
   UserId,
+  WireAttachment,
+  WireMessage,
   WireRoom,
   WireUser,
 } from "./protocol.ts";
 import type {
+  AppInstance,
+  Attachment,
+  AttachmentData,
+  HistoryOptions,
+  IterateOptions,
+  Message,
+  MessageData,
+  NextMessageOptions,
+  QuotedMessage,
+  ReplyOptions,
   RequestOptions,
+  Room,
   RoomData,
   Sendable,
   SendOptions,
   SendResult,
+  User,
   UserData,
+  WaitOptions,
 } from "./types.ts";
 
 /**
@@ -31,16 +46,24 @@ export function requireCapability(device: DeviceState, capability: Capability): 
   }
 }
 
+/** The stream of messages from all devices, which rooms read to wait for and iterate over messages. */
+export interface MessageStream {
+  wait(options: WaitOptions<Message>): Promise<Message>;
+  iterate(options: IterateOptions<Message>): AsyncIterableIterator<Message>;
+}
+
 /** A KakaoTalk app on a device. */
-export class AppInstanceImpl {
+export class AppInstanceImpl implements AppInstance {
   readonly id: AppInstanceId;
   readonly device: DeviceState;
   /** The user the app instance is signed in as, if the client can tell. Set when the client says hello. */
   me: UserImpl | undefined;
+  readonly messages: MessageStream;
 
-  constructor(device: DeviceState, id: AppInstanceId) {
+  constructor(device: DeviceState, id: AppInstanceId, messages: MessageStream) {
     this.device = device;
     this.id = id;
+    this.messages = messages;
   }
 
   /** The room with the given id. Does not ask the device. */
@@ -57,7 +80,7 @@ export class AppInstanceImpl {
 }
 
 /** A KakaoTalk user, as seen from one app instance. */
-export class UserImpl {
+export class UserImpl implements User {
   readonly id: UserId;
   readonly name: string;
   readonly appInstance: AppInstanceImpl;
@@ -90,7 +113,7 @@ export class UserImpl {
 }
 
 /** A chat room of an app instance. */
-export class RoomImpl {
+export class RoomImpl implements Room {
   readonly id: RoomId;
   readonly appInstance: AppInstanceImpl;
   /** `undefined` until the device has described the room. */
@@ -170,6 +193,44 @@ export class RoomImpl {
     return users.map((wire) => new UserImpl(this.appInstance, wire));
   }
 
+  /** Asks the device for the messages of the room, newest first. */
+  async history(options?: HistoryOptions): Promise<MessageImpl[]> {
+    requireCapability(this.device, "room.history");
+    const before = typeof options?.before === "string" ? options.before : options?.before?.id;
+    const { messages } = await this.device.request(
+      "room.history",
+      {
+        ...this.#params(),
+        limit: options?.limit ?? 50,
+        ...(before === undefined ? {} : { before }),
+      },
+      options,
+    );
+    return messages.map((wire) => new MessageImpl(this.appInstance, wire, false));
+  }
+
+  /** Waits for the next message in this room, from the given user if `options.from` is set. */
+  nextMessage(options?: NextMessageOptions): Promise<Message> {
+    const from = typeof options?.from === "string" ? options.from : options?.from?.id;
+    const extra = options?.filter;
+    return this.appInstance.messages.wait({
+      ...timeoutAndSignal(options),
+      filter: (message) =>
+        message.room.ref === this.ref &&
+        (from === undefined || message.sender.id === from) &&
+        (extra === undefined || extra(message)),
+    });
+  }
+
+  /** Iterates over the messages in this room as they arrive. */
+  messages(options?: IterateOptions<Message>): AsyncIterableIterator<Message> {
+    const extra = options?.filter;
+    return this.appInstance.messages.iterate({
+      ...options,
+      filter: (message) => message.room.ref === this.ref && (extra === undefined || extra(message)),
+    });
+  }
+
   toJSON(): RoomData {
     return {
       ref: this.ref,
@@ -186,4 +247,143 @@ export class RoomImpl {
   #params(): { appInstance: AppInstanceId; room: RoomId } {
     return { appInstance: this.appInstance.id, room: this.id };
   }
+}
+
+/** A file attached to a message. */
+export class AttachmentImpl implements Attachment {
+  readonly type: WireAttachment["type"];
+  readonly name: string | undefined;
+  readonly mimeType: string | undefined;
+  readonly size: number | undefined;
+  readonly #message: MessageImpl;
+  /** Position in the attachments of the message. */
+  readonly #index: number;
+
+  constructor(message: MessageImpl, index: number, wire: WireAttachment) {
+    this.#message = message;
+    this.#index = index;
+    this.type = wire.type;
+    this.name = wire.name;
+    this.mimeType = wire.mime;
+    this.size = wire.size;
+  }
+
+  /** Downloads the file from the device. */
+  async fetch(options?: RequestOptions): Promise<Blob> {
+    const room = this.#message.room;
+    requireCapability(room.device, "message.attachments");
+    const { data } = await room.device.request(
+      "attachment.fetch",
+      {
+        appInstance: room.appInstance.id,
+        room: room.id,
+        message: this.#message.id,
+        index: this.#index,
+      },
+      options,
+    );
+    const blob = wireBlobToBlob(data);
+    if (blob === undefined) {
+      throw new RKError("CLIENT_ERROR", "device sent no data for the attachment", {
+        device: room.device,
+      });
+    }
+    return blob;
+  }
+
+  toJSON(): AttachmentData {
+    return {
+      type: this.type,
+      ...(this.name === undefined ? {} : { name: this.name }),
+      ...(this.mimeType === undefined ? {} : { mimeType: this.mimeType }),
+      ...(this.size === undefined ? {} : { size: this.size }),
+    };
+  }
+}
+
+/** A message a device reported, which does not change afterwards. */
+export class MessageImpl implements Message {
+  readonly id: MessageId;
+  readonly room: RoomImpl;
+  readonly sender: UserImpl;
+  readonly type: Message["type"];
+  readonly text: string;
+  readonly time: Date;
+  readonly hasMentions: boolean;
+  readonly mentions: readonly UserImpl[];
+  readonly attachments: readonly AttachmentImpl[];
+  readonly quoted: QuotedMessage | undefined;
+  readonly replayed: boolean;
+  readonly raw: Readonly<Record<string, unknown>>;
+
+  constructor(appInstance: AppInstanceImpl, wire: WireMessage, replayed: boolean) {
+    this.id = wire.id;
+    this.room = new RoomImpl(appInstance, wire.room);
+    this.sender = new UserImpl(appInstance, wire.sender);
+    this.type = wire.type;
+    this.text = wire.text;
+    this.time = new Date(wire.time);
+    this.mentions = (wire.mentions ?? []).map((user) => new UserImpl(appInstance, user));
+    this.hasMentions = wire.hasMentions ?? this.mentions.length > 0;
+    this.attachments = (wire.attachments ?? []).map(
+      (attachment, index) => new AttachmentImpl(this, index, attachment),
+    );
+    this.quoted =
+      wire.quoted === undefined
+        ? undefined
+        : {
+            id: wire.quoted.id,
+            text: wire.quoted.text,
+            sender:
+              wire.quoted.sender === undefined
+                ? undefined
+                : new UserImpl(appInstance, wire.quoted.sender),
+          };
+    this.replayed = replayed;
+    this.raw = Object.freeze({ ...wire.raw });
+  }
+
+  /** Sends to the room of this message. With `quote: true`, as a KakaoTalk reply to this message. */
+  reply(content: Sendable, options?: ReplyOptions): Promise<SendResult> {
+    return this.room.send(content, {
+      ...timeoutAndSignal(options),
+      ...(options?.quote === true ? { quote: this } : {}),
+    });
+  }
+
+  markRead(options?: RequestOptions): Promise<void> {
+    return this.room.markRead(options);
+  }
+
+  toJSON(): MessageData {
+    return {
+      id: this.id,
+      room: this.room.toJSON(),
+      sender: this.sender.toJSON(),
+      type: this.type,
+      text: this.text,
+      time: this.time.toISOString(),
+      hasMentions: this.hasMentions,
+      mentions: this.mentions.map((user) => user.toJSON()),
+      attachments: this.attachments.map((attachment) => attachment.toJSON()),
+      replayed: this.replayed,
+      ...(this.quoted === undefined
+        ? {}
+        : {
+            quoted: {
+              id: this.quoted.id,
+              text: this.quoted.text,
+              ...(this.quoted.sender === undefined ? {} : { sender: this.quoted.sender.toJSON() }),
+            },
+          }),
+    };
+  }
+}
+
+/** Only the timeout and the signal of the options, to pass on to another call. */
+function timeoutAndSignal(options: RequestOptions | undefined): RequestOptions {
+  return {
+    ...(options?.timeout === undefined ? {} : { timeout: options.timeout }),
+    ...(options?.signal === undefined ? {} : { signal: options.signal }),
+  };
 }
