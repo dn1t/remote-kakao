@@ -453,8 +453,8 @@ describe("DeviceState", () => {
       assert.ok(isRKError(((await request) as { error: unknown }).error, "DEVICE_OFFLINE"));
     });
 
-    for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31]) {
-      it(`rejects with a RangeError for the timeout ${timeout}`, async () => {
+    for (const timeout of [-1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 31, "5000" as never]) {
+      it(`rejects with a RangeError for the timeout ${String(timeout)}`, async () => {
         const { device } = newDevice();
 
         await assert.rejects(device.extensionRequest("x:y", null, { timeout }), RangeError);
