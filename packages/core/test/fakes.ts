@@ -1,5 +1,5 @@
-import { DeviceState, SessionState } from "../src/device.ts";
 import type { DeviceContext } from "../src/device.ts";
+import { DeviceState, SessionState } from "../src/device.ts";
 import type { RequestFrame } from "../src/protocol.ts";
 import { openFrame } from "../src/seal.ts";
 import type { Link } from "../src/types.ts";
@@ -43,7 +43,7 @@ export function newDevice(options: { requestTimeout?: number } = {}) {
 
 /**
  * Plain session (no keys) over a fake link. `reliable: false` makes the core retransmit.
- * `sent()` returns the requests written to the link so far.
+ * `sent()` returns the requests written to the link so far, and `frames()` all the frames.
  */
 export function plainSession(reliable = true) {
   const link = { ...fakeLink(), reliable };
@@ -59,7 +59,8 @@ export function plainSession(reliable = true) {
     link.written
       .map((bytes) => openFrame(bytes)?.frame)
       .filter((f) => f?.t === "req") as RequestFrame[];
-  return { session, link, sent };
+  const frames = () => link.written.map((bytes) => openFrame(bytes)?.frame);
+  return { session, link, sent, frames };
 }
 
 export const settled = (promise: Promise<unknown>) =>
