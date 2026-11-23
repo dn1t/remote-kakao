@@ -76,6 +76,8 @@ export class SessionState implements DeviceSession {
   readonly #replayWindow = new ReplayWindow();
   /** In the order the pings were sent: a `pong` answers the oldest. */
   readonly #pingWaiters: PingWaiter[] = [];
+  /** Called, once, when the session ends. */
+  readonly #endCallbacks: Array<() => void> = [];
 
   constructor(params: SessionParams) {
     this.id = params.id;
@@ -144,13 +146,23 @@ export class SessionState implements DeviceSession {
     waiter.resolve();
   }
 
-  /** Marks the session as over and rejects the pings still waiting. Does not close the link. */
+  /** Calls `callback` once, when the session ends. Calls it now if the session already ended. */
+  onEnd(callback: () => void): void {
+    if (this.ended) callback();
+    else this.#endCallbacks.push(callback);
+  }
+
+  /**
+   * Marks the session as over, rejects the pings still waiting, and calls the callbacks of `onEnd`.
+   * Does not close the link.
+   */
   end(): void {
     this.ended = true;
     for (const waiter of this.#pingWaiters.splice(0)) {
       clearTimeout(waiter.timer);
       waiter.reject(sessionEnded());
     }
+    for (const callback of this.#endCallbacks.splice(0)) callback();
   }
 
   /** Returns whether the waiter was still waiting. */
