@@ -1,28 +1,44 @@
 import { randomUUID } from "node:crypto";
 
 import { decodeRef } from "./convert.ts";
-import type { DeviceContext } from "./device.ts";
-import { DeviceState } from "./device.ts";
+import type { DeviceContext, SessionKeys } from "./device.ts";
+import { DeviceState, SessionState } from "./device.ts";
 import { Emitter } from "./emitter.ts";
 import type { MessageStream } from "./entities.ts";
-import { AppInstanceImpl } from "./entities.ts";
+import { AppInstanceImpl, UserImpl } from "./entities.ts";
 import { createErrorReporter } from "./error-report.ts";
+import { RKError } from "./errors.ts";
+import { checkHello, SALT_TTL } from "./hello.ts";
+import type { IncomingFrame, TokenLookup } from "./intake.ts";
+import { intake } from "./intake.ts";
 import type { ResolvedOptions } from "./options.ts";
 import { resolveOptions } from "./options.ts";
-import type { AppInstanceId, DeviceId } from "./protocol.ts";
+import type { AppInstanceId, DeviceId, Hello, Reject, ServerFrame } from "./protocol.ts";
+import { PROTOCOL_VERSION } from "./protocol.ts";
+import { SaltCache } from "./salt-cache.ts";
+import { Direction, sealFrame } from "./seal.ts";
 import type {
   Device,
   ErrorReport,
   EventName,
   EventPayload,
   IterateOptions,
+  Link,
   Listener,
   ListenerOptions,
   RemoteKakaoOptions,
   Room,
+  Transport,
+  TransportHandle,
   Unsubscribe,
   WaitOptions,
 } from "./types.ts";
+
+/** What a link holds once its device has said hello. */
+interface Connection {
+  device: DeviceState;
+  session: SessionState;
+}
 
 /**
  * The main class of remote-kakao: a server that devices running a KakaoTalk client connect to.
@@ -44,6 +60,11 @@ export class RemoteKakao {
   /** Tells this run apart from earlier ones, so request ids stay unique across restarts. */
   readonly #bootId = randomUUID();
   #requestCounter = 0;
+  /** `undefined` when `auth` is off. */
+  readonly #tokenOf: TokenLookup | undefined;
+  readonly #saltCache = new SaltCache(SALT_TTL);
+  readonly #handles: TransportHandle[] = [];
+  #listening = false;
 
   /** Throws if the options are invalid. */
   constructor(options: RemoteKakaoOptions) {
@@ -55,6 +76,12 @@ export class RemoteKakao {
       onDrop: (event, dropped) => logger.warn(`dropped ${dropped} buffered "${event}" payload(s)`),
     });
     this.#reportError = createErrorReporter(this.#emitter, logger);
+
+    const { auth } = this.#options;
+    this.#tokenOf =
+      auth === false
+        ? undefined
+        : async (device) => (typeof auth.token === "function" ? auth.token(device) : auth.token);
 
     this.#messages = {
       wait: (options) => this.#emitter.wait("message", options),
@@ -77,6 +104,30 @@ export class RemoteKakao {
   /** Every device that has connected, by id. A device stays after it disconnects. */
   get devices(): ReadonlyMap<DeviceId, Device> {
     return this.#devices;
+  }
+
+  /**
+   * Starts every transport, so that devices can connect.
+   * If a transport fails to start, the ones started before it are stopped, and this rejects.
+   * Does nothing if it is already listening.
+   */
+  async listen(): Promise<void> {
+    if (this.#listening) return;
+    this.#listening = true;
+
+    const opened: TransportHandle[] = [];
+    try {
+      for (const transport of this.#options.transports) {
+        const handle = await transport.listen((link) => void this.#acceptLink(transport, link));
+        opened.push(handle);
+        this.#options.logger.info(`listening on ${handle.address}`);
+      }
+    } catch (error) {
+      await Promise.allSettled(opened.map((handle) => handle.close()));
+      this.#listening = false;
+      throw error;
+    }
+    this.#handles.push(...opened);
   }
 
   /** Calls `listener` every time the event happens. */
@@ -121,6 +172,137 @@ export class RemoteKakao {
     return this.#ensureAppInstance(device, location.appInstance).room(location.room);
   }
 
+  /** Reads the frames of a link until it ends. The first one has to be a hello. */
+  async #acceptLink(transport: Transport, link: Link): Promise<void> {
+    const { logger } = this.#options;
+    let connection: Connection | undefined;
+    let failure: RKError | undefined;
+    try {
+      for await (const raw of link.frames) {
+        const result = await intake(raw, this.#tokenOf, connection?.session);
+        if (result.kind === "ignore") {
+          logger.debug(`ignored a frame: ${result.reason}`);
+          continue;
+        }
+        if (result.kind === "close") {
+          logger.warn(`closing link: ${result.reason}`);
+          link.close(result.code);
+          break;
+        }
+
+        const { frame } = result.incoming;
+        if (connection === undefined) {
+          if (frame.t !== "hello") {
+            logger.warn("closing link: expected hello");
+            link.close("PROTOCOL_ERROR");
+            break;
+          }
+          connection = await this.#acceptHello(
+            transport,
+            link,
+            result.incoming,
+            frame,
+            result.keys,
+          );
+          if (connection === undefined) break;
+        }
+      }
+    } catch (error) {
+      failure = new RKError("PROTOCOL_ERROR", "link failed", { cause: error });
+      this.#reportError({
+        error,
+        source: "transport",
+        event: undefined,
+        device: connection?.device,
+      });
+    } finally {
+      if (connection !== undefined)
+        this.#endSession(connection.device, connection.session, failure);
+    }
+  }
+
+  /**
+   * Starts the session the hello asks for, or refuses the hello and closes the link.
+   * Returns `undefined` when the link was closed.
+   */
+  async #acceptHello(
+    transport: Transport,
+    link: Link,
+    incoming: IncomingFrame,
+    hello: Hello,
+    keys: SessionKeys | undefined,
+  ): Promise<Connection | undefined> {
+    const { auth, heartbeat, logger } = this.#options;
+    const verdict = await checkHello(hello, {
+      device: incoming.device,
+      salt: incoming.salt,
+      transport: transport.name,
+      remoteAddress: link.remoteAddress,
+      saltCache: this.#saltCache,
+      verify: auth === false ? undefined : auth.verify?.bind(auth),
+      onVerifyError: (error) =>
+        this.#reportError({ error, source: "device", event: undefined, device: undefined }),
+    });
+    if (!verdict.accepted) {
+      logger.warn(`closing link: ${verdict.reason}`);
+      if (verdict.reject !== undefined)
+        await sendReject(link, incoming.device, keys, verdict.reject);
+      link.close(verdict.code);
+      return undefined;
+    }
+
+    const device = this.#describeDevice(hello);
+    const session = new SessionState({
+      id: randomUUID(),
+      device: device.id,
+      transport: transport.name,
+      link,
+      keys,
+      budget: hello.budget,
+    });
+
+    const previous = device.session;
+    if (previous !== undefined) {
+      this.#endSession(device, previous, undefined);
+      previous.link.close("replaced by a new session");
+    }
+    await session.send({
+      t: "welcome",
+      v: PROTOCOL_VERSION,
+      session: session.id,
+      ...(hello.budget === undefined ? { heartbeat: heartbeat.interval } : {}),
+    });
+    device.attachSession(session);
+    void this.#emitter.emit("deviceConnect", device);
+    this.#maybeIdle(device);
+    return { device, session };
+  }
+
+  /** Records what the hello says about the device and its app instances. */
+  #describeDevice(hello: Hello): DeviceState {
+    const device = this.#ensureDevice(hello.device.id);
+    device.name = hello.device.name;
+    device.platform = hello.device.platform;
+    device.client = hello.client;
+    device.protocolVersion = hello.v;
+    device.described = true;
+    device.capabilities.clear();
+    for (const capability of hello.caps) device.capabilities.add(capability);
+    for (const wire of hello.appInstances) {
+      const appInstance = this.#ensureAppInstance(device, wire.id);
+      appInstance.me = wire.me === undefined ? undefined : new UserImpl(appInstance, wire.me);
+    }
+    return device;
+  }
+
+  /** Ends the session, unless it already ended, and tells about it with `deviceDisconnect`. */
+  #endSession(device: DeviceState, session: SessionState, error: RKError | undefined): void {
+    if (session.ended) return;
+    const wasCurrent = device.session === session;
+    device.detachSession(session);
+    if (wasCurrent) void this.#emitter.emit("deviceDisconnect", { device, error });
+  }
+
   /** The device with the id. A device that has not connected yet gets placeholder details. */
   #ensureDevice(id: DeviceId): DeviceState {
     let device = this.#devices.get(id);
@@ -154,5 +336,26 @@ export class RemoteKakao {
     if (device.pendingCount > 0 || session.openDispatches > 0) return;
     session.idleNotified = true;
     session.send({ t: "idle" }).catch(() => {});
+  }
+}
+
+/** Answers a `hello` that was refused. There is no session yet, so the frame is sealed with the counter 0. */
+async function sendReject(
+  link: Link,
+  device: DeviceId,
+  keys: SessionKeys | undefined,
+  reject: Reject,
+): Promise<void> {
+  const frame: ServerFrame = reject;
+  const bytes = sealFrame(
+    frame,
+    keys === undefined
+      ? { direction: Direction.Down, device }
+      : { direction: Direction.Down, device, salt: keys.salt, counter: 0n, key: keys.down },
+  );
+  try {
+    await link.send(bytes);
+  } catch {
+    // The link is about to be closed anyway.
   }
 }
