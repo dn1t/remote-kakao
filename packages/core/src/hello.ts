@@ -47,12 +47,21 @@ export interface HelloContext {
 /**
  * Decides whether to accept the `hello` that starts a session.
  *
- * Checks, in this order: the protocol version, the shape of the `hello`, that it is from the device
- * that sealed it, that the clock of the device is close to ours, that its salt is new, and `verify`.
+ * Checks, in this order: that its salt is new, the protocol version, the shape of the `hello`,
+ * that it is from the device that sealed it, that the clock of the device is close to ours, and `verify`.
+ *
+ * The salt is checked first, and used up even if the `hello` is then refused.
+ * Node answers a `hello` with a `reject` or a `welcome`, and seals either with counter 0
+ * under the keys made from the salt. Two different frames sealed with the same key and counter
+ * would leak their contents, so a salt may be answered only once.
+ *
  * A refusal is answered with a `reject`, except for a malformed `hello` and a repeated salt.
  * A repeated salt means the frame was recorded and sent again, so the sender is told nothing.
  */
 export async function checkHello(hello: Hello, context: HelloContext): Promise<HelloVerdict> {
+  if (context.salt.length > 0 && !context.saltCache.add(context.salt)) {
+    return refuse("AUTH_FAILED", "replayed session salt", undefined);
+  }
   if (hello.v !== PROTOCOL_VERSION) {
     return refuse("PROTOCOL_MISMATCH", "version mismatch", {
       t: "reject",
@@ -77,10 +86,6 @@ export async function checkHello(hello: Hello, context: HelloContext): Promise<H
       message: `clock differs from the server by more than ${MAX_CLOCK_SKEW / 60_000} minutes`,
     });
   }
-  if (context.salt.length > 0 && !context.saltCache.add(context.salt)) {
-    return refuse("AUTH_FAILED", "replayed session salt", undefined);
-  }
-
   if (context.verify !== undefined) {
     let allowed = false;
     try {
