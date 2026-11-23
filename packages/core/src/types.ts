@@ -146,7 +146,7 @@ export interface MessageData {
   replayed: boolean;
 }
 
-/** What a device presents when it connects. Passed to `AuthOptions.verify`. */
+/** Description of a device that is connecting. Passed to `AuthOptions.verify`. */
 export interface DeviceHello {
   readonly device: { readonly id: DeviceId; readonly name: string; readonly platform: Platform };
   readonly client: { readonly name: string; readonly version: string };

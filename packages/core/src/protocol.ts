@@ -7,7 +7,7 @@
 export const PROTOCOL_VERSION = 1 as const;
 
 /**
- * What a client can do. Extensions use `namespace:name`.
+ * A feature a client supports. Extensions use `namespace:name`.
  * `send.*` extend `room.send`; a client without `room.send` is read-only.
  *
  * `unverified`: not yet confirmed to work on any client.
