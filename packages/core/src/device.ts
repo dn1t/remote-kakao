@@ -519,7 +519,10 @@ export class DeviceState implements Device {
   }
 }
 
-function timeoutError(timeout: number): RangeError | undefined {
-  if (timeout >= 0 && timeout <= MAX_TIMEOUT) return undefined;
-  return new RangeError(`timeout must be between 0 and ${MAX_TIMEOUT} ms, got ${timeout}`);
+/** Returns an error if `timeout` is not a number of ms that `setTimeout` can wait for. `name` is what the message calls it. */
+export function timeoutError(timeout: unknown, name = "timeout"): RangeError | undefined {
+  if (typeof timeout === "number" && timeout >= 0 && timeout <= MAX_TIMEOUT) return undefined;
+  return new RangeError(
+    `${name} must be a number between 0 and ${MAX_TIMEOUT} ms, got ${String(timeout)}`,
+  );
 }
