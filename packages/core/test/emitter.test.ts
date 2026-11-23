@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { getEventListeners } from "node:events";
+import { afterEach, describe, it, mock } from "node:test";
 
 import { Emitter } from "../src/emitter.ts";
+import { isRKError } from "../src/errors.ts";
 import type { EventName, EventPayload } from "../src/types.ts";
 
 type Report = EventPayload<"error">;
@@ -354,5 +356,233 @@ describe("Emitter, settle", () => {
     const { emitter } = create();
 
     await emitter.settle();
+  });
+});
+
+afterEach(() => mock.timers.reset());
+
+/** Whether the promise has settled once the work that is already waiting has run. */
+async function isSettled(promise: Promise<unknown>): Promise<boolean> {
+  let settled = false;
+  promise.then(
+    () => (settled = true),
+    () => (settled = true),
+  );
+  await tick();
+  return settled;
+}
+
+describe("Emitter, wait", () => {
+  it("resolves with the next payload, not with an earlier one", async () => {
+    const { emitter } = create();
+    await emitter.emit("error", report("before"));
+    const next = report("next");
+
+    const waiting = emitter.wait("error");
+    await emitter.emit("error", next);
+
+    assert.equal(await waiting, next);
+  });
+
+  it("skips the payloads that the filter refuses", async () => {
+    const { emitter } = create();
+    const waiting = emitter.wait("error", { filter: (payload) => payload.error === "b" });
+    const wanted = report("b");
+
+    await emitter.emit("error", report("a"));
+    assert.equal(await isSettled(waiting), false);
+    await emitter.emit("error", wanted);
+
+    assert.equal(await waiting, wanted);
+  });
+
+  it("stops listening once it has settled", async () => {
+    const { emitter } = create();
+    const waiting = emitter.wait("error");
+    assert.equal(emitter.has("error"), true);
+
+    await emitter.emit("error", report("x"));
+    await waiting;
+
+    assert.equal(emitter.has("error"), false);
+  });
+
+  it("lets several waits for the same event settle on their own", async () => {
+    const { emitter } = create();
+    const first = emitter.wait("error");
+    const second = emitter.wait("error", { filter: (payload) => payload.error === "later" });
+
+    await emitter.emit("error", report("now"));
+
+    assert.equal((await first).error, "now");
+    assert.equal(await isSettled(second), false);
+    await emitter.emit("error", report("later"));
+    assert.equal((await second).error, "later");
+  });
+
+  it("rejects with the error of a filter that throws, and stops listening", async () => {
+    const { emitter, errors } = create();
+    const failure = new Error("bad filter");
+    const waiting = emitter.wait("error", {
+      filter: () => {
+        throw failure;
+      },
+    });
+
+    await emitter.emit("error", report("x"));
+
+    await assert.rejects(waiting, (error) => error === failure);
+    assert.equal(emitter.has("error"), false);
+    assert.deepEqual(errors, []);
+  });
+
+  describe("with a timeout", () => {
+    it("rejects with TIMEOUT once the time has passed", async () => {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      const { emitter } = create();
+      const waiting = emitter.wait("error", { timeout: 100 });
+      const outcome = assert.rejects(waiting, (error) => {
+        return isRKError(error, "TIMEOUT") && error.retryable && /error.*100ms/.test(error.message);
+      });
+
+      mock.timers.tick(99);
+      assert.equal(await isSettled(waiting), false);
+      mock.timers.tick(1);
+      await outcome;
+
+      assert.equal(emitter.has("error"), false);
+    });
+
+    it("resolves when the payload comes in time", async () => {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      const { emitter } = create();
+      const waiting = emitter.wait("error", { timeout: 100 });
+      const payload = report("x");
+
+      mock.timers.tick(50);
+      await emitter.emit("error", payload);
+      mock.timers.tick(1000);
+
+      assert.equal(await waiting, payload);
+    });
+
+    it("does not leave its timer running once it has settled", async () => {
+      const { emitter } = create();
+      const timers = () => process.getActiveResourcesInfo().filter((name) => name === "Timeout");
+      const before = timers().length;
+
+      const waiting = emitter.wait("error", { timeout: 60_000 });
+      assert.equal(timers().length, before + 1);
+      await emitter.emit("error", report("x"));
+      await waiting;
+
+      assert.equal(timers().length, before);
+    });
+
+    it("waits without limit when there is no timeout", async () => {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      const { emitter } = create();
+      const waiting = emitter.wait("error");
+
+      mock.timers.tick(10 ** 9);
+
+      assert.equal(await isSettled(waiting), false);
+    });
+  });
+
+  describe("with a signal", () => {
+    it("rejects with ABORTED and the reason of the abort", async () => {
+      const { emitter } = create();
+      const controller = new AbortController();
+      const reason = new Error("stop");
+      const waiting = emitter.wait("error", { signal: controller.signal });
+
+      controller.abort(reason);
+
+      await assert.rejects(waiting, (error) => {
+        return isRKError(error, "ABORTED") && error.cause === reason;
+      });
+      assert.equal(emitter.has("error"), false);
+    });
+
+    it("rejects at once for a signal that is already aborted, without listening", async () => {
+      const { emitter } = create();
+
+      await assert.rejects(emitter.wait("error", { signal: AbortSignal.abort() }), (error) => {
+        return isRKError(error, "ABORTED");
+      });
+      assert.equal(emitter.has("error"), false);
+    });
+
+    it("does not leave its listener on the signal once it has settled", async () => {
+      const { emitter } = create();
+      const controller = new AbortController();
+      const waiting = emitter.wait("error", { signal: controller.signal });
+      assert.equal(getEventListeners(controller.signal, "abort").length, 1);
+
+      await emitter.emit("error", report("x"));
+      await waiting;
+
+      assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    });
+
+    it("ignores an abort after the wait has settled", async () => {
+      const { emitter } = create();
+      const controller = new AbortController();
+      const waiting = emitter.wait("error", { signal: controller.signal });
+      const payload = report("x");
+
+      await emitter.emit("error", payload);
+      controller.abort();
+
+      assert.equal(await waiting, payload);
+    });
+  });
+});
+
+describe("Emitter, close", () => {
+  it("rejects the waits that are pending with CLOSED", async () => {
+    const { emitter } = create();
+    const first = emitter.wait("error");
+    const second = emitter.wait("deviceConnect");
+
+    emitter.close();
+
+    for (const waiting of [first, second]) {
+      await assert.rejects(waiting, (error) => isRKError(error, "CLOSED"));
+    }
+  });
+
+  it("rejects every wait that starts afterwards", async () => {
+    const { emitter } = create();
+    emitter.close();
+
+    await assert.rejects(emitter.wait("error"), (error) => isRKError(error, "CLOSED"));
+    assert.equal(emitter.has("error"), false);
+  });
+
+  it("removes all listeners, and can be called again", async () => {
+    const { emitter } = create();
+    let count = 0;
+    emitter.on("error", () => count++);
+
+    emitter.close();
+    emitter.close();
+    await emitter.emit("error", report("x"));
+
+    assert.equal(count, 0);
+    assert.equal(emitter.has("error"), false);
+  });
+
+  it("stops the timer of a wait that it rejects", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const { emitter } = create();
+    const waiting = emitter.wait("error", { timeout: 100 });
+    const outcome = assert.rejects(waiting, (error) => isRKError(error, "CLOSED"));
+
+    emitter.close();
+    mock.timers.tick(1000);
+
+    await outcome;
   });
 });
