@@ -9,6 +9,7 @@ import type {
   DeviceDisconnect,
   ErrorReport,
   Message,
+  Plugin,
   RemoteKakaoOptions,
   Transport,
 } from "../src/types.ts";
@@ -1508,5 +1509,247 @@ describe("listen with a signal", () => {
 
     assert.equal(state.closed, true);
     await assert.rejects(kakao.wait("message"), (error) => isRKError(error, "CLOSED"));
+  });
+});
+
+describe("plugins", () => {
+  /** A plugin that logs when it is set up and cleaned up. */
+  function loggedPlugin(log: string[], name: string, options: { async?: boolean } = {}): Plugin {
+    return {
+      name,
+      async setup() {
+        log.push(`setup ${name}`);
+        if (options.async) await flush();
+        log.push(`ready ${name}`);
+        return () => void log.push(`cleanup ${name}`);
+      },
+    };
+  }
+
+  /** A core on a transport that can start, not started yet. */
+  function create() {
+    return new RemoteKakao({ transports: [fakeTransport().transport], auth: false, logger: false });
+  }
+
+  function loggedKakao(log: string[]) {
+    const transport: Transport = {
+      name: "fake",
+      async listen() {
+        log.push("transport");
+        return { address: "fake://x", async close() {} };
+      },
+    };
+    return new RemoteKakao({ transports: [transport], auth: false, logger: false });
+  }
+
+  it("sets plugins up in order, one after the other, before the transports start", async () => {
+    const log: string[] = [];
+    const kakao = loggedKakao(log);
+    kakao.use(loggedPlugin(log, "a", { async: true })).use(loggedPlugin(log, "b"));
+
+    await kakao.listen();
+
+    assert.deepEqual(log, ["setup a", "ready a", "setup b", "ready b", "transport"]);
+  });
+
+  it("gives the plugin the RemoteKakao it was added to", async () => {
+    const kakao = create();
+    const received: unknown[] = [];
+    kakao.use({ name: "p", setup: (rk) => void received.push(rk) });
+
+    await kakao.listen();
+
+    assert.deepEqual(received, [kakao]);
+  });
+
+  it("lets a plugin listen to events, and stop with the function it returns", async () => {
+    const { transport, connect } = fakeTransport();
+    const kakao = new RemoteKakao({ transports: [transport], auth: false, logger: false });
+    const seen: string[] = [];
+    kakao.use({
+      name: "watcher",
+      setup: (rk) => rk.on("deviceConnect", (device) => void seen.push(device.id)),
+    });
+    await kakao.listen();
+
+    connect().push(fakeClient({ token: undefined }).hello());
+    await flush();
+    await kakao.close();
+
+    assert.deepEqual(seen, ["phone"]);
+  });
+
+  it("sets up a plugin at once when it is added after listen, and does not do it twice", async () => {
+    const log: string[] = [];
+    const kakao = loggedKakao(log);
+    await kakao.listen();
+    const plugin = loggedPlugin(log, "late");
+
+    kakao.use(plugin).use(plugin);
+    await flush();
+
+    assert.deepEqual(log, ["transport", "setup late", "ready late"]);
+  });
+
+  it("sets a plugin up once when it is added while listen is setting up the others", async () => {
+    const log: string[] = [];
+    const kakao = loggedKakao(log);
+    const slow: Plugin = {
+      name: "slow",
+      async setup() {
+        log.push("setup slow");
+        await flush();
+      },
+    };
+    kakao.use(slow);
+
+    const listening = kakao.listen();
+    kakao.use(loggedPlugin(log, "added"));
+    await listening;
+
+    assert.deepEqual(log, ["setup slow", "setup added", "ready added", "transport"]);
+  });
+
+  it("returns this from use, and refuses what is not a plugin", () => {
+    const kakao = create();
+
+    assert.equal(kakao.use({ name: "p", setup() {} }), kakao);
+    for (const plugin of [undefined, null, {}, { name: "p" }, { setup() {} }, "plugin"]) {
+      assert.throws(() => kakao.use(plugin as never), TypeError);
+    }
+  });
+
+  it("calls the cleanups when closing, the last plugin first, after the sessions ended", async () => {
+    const log: string[] = [];
+    const { transport, connect } = fakeTransport();
+    const kakao = new RemoteKakao({ transports: [transport], auth: false, logger: false });
+    kakao.use(loggedPlugin(log, "a")).use(loggedPlugin(log, "b"));
+    kakao.on("deviceDisconnect", () => void log.push("disconnect"));
+    await kakao.listen();
+    connect().push(fakeClient({ token: undefined }).hello());
+    await flush();
+    log.length = 0;
+
+    await kakao.close();
+
+    assert.deepEqual(log, ["disconnect", "cleanup b", "cleanup a"]);
+  });
+
+  it("does not need a plugin to return a cleanup", async () => {
+    const kakao = create();
+    kakao.use({ name: "quiet", setup() {} }).use({ name: "async", async setup() {} });
+    await kakao.listen();
+
+    await assert.doesNotReject(kakao.close());
+  });
+
+  it("reports a cleanup that fails, and still runs the others", async () => {
+    const log: string[] = [];
+    const kakao = create();
+    const errors: ErrorReport[] = [];
+    kakao.on("error", (report) => void errors.push(report));
+    const failure = new Error("cleanup failed");
+    kakao.use(loggedPlugin(log, "a")).use({
+      name: "bad",
+      setup: () => () => {
+        throw failure;
+      },
+    });
+    await kakao.listen();
+
+    await kakao.close();
+
+    assert.deepEqual(log, ["setup a", "ready a", "cleanup a"]);
+    assert.deepEqual(
+      errors.map((report) => [report.source, report.error]),
+      [["plugin", failure]],
+    );
+  });
+
+  it("makes listen reject when a setup fails, undoes the plugins before it, and sets them up again on the next try", async () => {
+    const log: string[] = [];
+    const kakao = loggedKakao(log);
+    let fail = true;
+    kakao.use(loggedPlugin(log, "a")).use({
+      name: "flaky",
+      setup() {
+        if (fail) throw new Error("setup failed");
+        log.push("flaky ok");
+      },
+    });
+
+    await assert.rejects(kakao.listen(), { message: "setup failed" });
+    assert.deepEqual(log, ["setup a", "ready a", "cleanup a"]);
+    fail = false;
+    await kakao.listen();
+
+    assert.deepEqual(log.slice(3), ["setup a", "ready a", "flaky ok", "transport"]);
+  });
+
+  it("does not start the transports when a setup fails", async () => {
+    const { transport, state } = fakeTransport();
+    const kakao = new RemoteKakao({ transports: [transport], auth: false, logger: false });
+    kakao.use({
+      name: "bad",
+      setup() {
+        throw new Error("nope");
+      },
+    });
+
+    await assert.rejects(kakao.listen());
+
+    assert.equal(state.listening, false);
+  });
+
+  it("reports a setup that fails after listen as an error of the plugin", async () => {
+    const kakao = create();
+    const errors: ErrorReport[] = [];
+    kakao.on("error", (report) => void errors.push(report));
+    await kakao.listen();
+    const failure = new Error("setup failed");
+
+    kakao.use({
+      name: "late-bad",
+      async setup() {
+        throw failure;
+      },
+    });
+    await flush();
+
+    assert.deepEqual(
+      errors.map((report) => [report.source, report.error]),
+      [["plugin", failure]],
+    );
+  });
+
+  it("cleans up a plugin whose setup finishes after close", async () => {
+    const log: string[] = [];
+    const kakao = create();
+    await kakao.listen();
+    let finish!: () => void;
+    kakao.use({
+      name: "slow",
+      setup: () =>
+        new Promise((resolve) => {
+          finish = () => resolve(() => void log.push("cleanup slow"));
+        }),
+    });
+    await flush();
+
+    await kakao.close();
+    finish();
+    await flush();
+
+    assert.deepEqual(log, ["cleanup slow"]);
+  });
+
+  it("refuses a plugin after close", async () => {
+    const kakao = create();
+    await kakao.close();
+
+    assert.throws(
+      () => kakao.use({ name: "p", setup() {} }),
+      (error) => isRKError(error, "CLOSED"),
+    );
   });
 });
