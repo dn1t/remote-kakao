@@ -296,7 +296,10 @@ export interface User {
   readonly id: UserId;
   readonly name: string;
   readonly appInstance: AppInstance;
-  /** `true` if this is the user the app instance is signed in as. */
+  /**
+   * `true` if this is the user the app instance is signed in as.
+   * Always `false` when the client does not tell who that is.
+   */
   readonly isMe: boolean;
 
   /** Requires `user.avatar`. */
