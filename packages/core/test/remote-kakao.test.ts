@@ -4,8 +4,14 @@ import { afterEach, describe, it, mock } from "node:test";
 import type { DeviceState } from "../src/device.ts";
 import { isRKError, RKError } from "../src/errors.ts";
 import { RemoteKakao } from "../src/remote-kakao.ts";
-import type { ErrorReport, RemoteKakaoOptions, Transport } from "../src/types.ts";
-import { flush, plainSession } from "./fakes.ts";
+import type {
+  Device,
+  DeviceDisconnect,
+  ErrorReport,
+  RemoteKakaoOptions,
+  Transport,
+} from "../src/types.ts";
+import { fakeClient, fakeTransport, flush, plainSession } from "./fakes.ts";
 
 const transport: Transport = {
   name: "fake",
@@ -294,6 +300,513 @@ describe("RemoteKakao", () => {
       await flush();
 
       assert.deepEqual(reports, []);
+    });
+  });
+
+  describe("listen", () => {
+    it("starts every transport, in order, and does it once", async () => {
+      const order: string[] = [];
+      const make = (name: string): Transport => ({
+        name,
+        async listen() {
+          order.push(name);
+          return { address: `${name}://x`, async close() {} };
+        },
+      });
+      const kakao = new RemoteKakao({
+        transports: [make("a"), make("b")],
+        auth: false,
+        logger: false,
+      });
+
+      await kakao.listen();
+      await kakao.listen();
+
+      assert.deepEqual(order, ["a", "b"]);
+    });
+
+    it("stops the transports it started and rejects when one fails, and can be tried again", async () => {
+      const closed: string[] = [];
+      let fail = true;
+      const started: string[] = [];
+      const good: Transport = {
+        name: "good",
+        async listen() {
+          started.push("good");
+          return {
+            address: "good://x",
+            async close() {
+              closed.push("good");
+            },
+          };
+        },
+      };
+      const bad: Transport = {
+        name: "bad",
+        async listen() {
+          started.push("bad");
+          if (fail) throw new Error("port in use");
+          return { address: "bad://x", async close() {} };
+        },
+      };
+      const kakao = new RemoteKakao({ transports: [good, bad], auth: false, logger: false });
+
+      await assert.rejects(kakao.listen(), { message: "port in use" });
+      assert.deepEqual(closed, ["good"]);
+      fail = false;
+
+      await kakao.listen();
+      assert.deepEqual(started, ["good", "bad", "good", "bad"]);
+    });
+  });
+});
+
+const TOKEN_AUTH = { token: "secret" };
+
+/** A started core on a fake transport. */
+async function start(options: Partial<RemoteKakaoOptions> = {}) {
+  const { transport, connect } = fakeTransport();
+  const kakao = new RemoteKakao({
+    transports: [transport],
+    auth: TOKEN_AUTH,
+    logger: false,
+    ...options,
+  });
+  const connected: Device[] = [];
+  const disconnected: DeviceDisconnect[] = [];
+  const errors: ErrorReport[] = [];
+  kakao.on("deviceConnect", (device) => void connected.push(device));
+  kakao.on("deviceDisconnect", (event) => void disconnected.push(event));
+  kakao.on("error", (report) => void errors.push(report));
+  await kakao.listen();
+  return { kakao, connect, connected, disconnected, errors };
+}
+
+describe("hello", () => {
+  describe("accepted", () => {
+    it("answers with a welcome sealed for the device, and starts a session", async () => {
+      const { kakao, connect, connected } = await start();
+      const client = fakeClient();
+      const link = connect();
+
+      link.push(client.hello());
+      await flush();
+
+      const [welcome] = client.received(link);
+      assert.equal(welcome?.counter, 0n);
+      assert.equal(welcome?.frame.t, "welcome");
+      const device = kakao.devices.get("phone")!;
+      assert.deepEqual(connected, [device]);
+      assert.equal(device.status, "online");
+      assert.equal(device.session?.transport, "fake");
+      assert.equal(device.session?.remoteAddress, "10.0.0.2:5000");
+      assert.equal(
+        (welcome!.frame as { session: string }).session,
+        (device.session as unknown as { id: string }).id,
+      );
+    });
+
+    it("works without auth, with plain frames", async () => {
+      const { kakao, connect } = await start({ auth: false });
+      const client = fakeClient({ token: undefined });
+      const link = connect();
+
+      link.push(client.hello());
+      await flush();
+
+      assert.equal(client.received(link)[0]?.frame.t, "welcome");
+      assert.equal(client.received(link)[0]?.sealed, false);
+      assert.equal(kakao.devices.get("phone")?.status, "online");
+    });
+
+    it("asks a client with no budget to ping within the heartbeat interval", async () => {
+      const { connect } = await start({ heartbeat: { interval: 4000, timeout: 9000 } });
+      const client = fakeClient();
+      const link = connect();
+
+      link.push(client.hello());
+      await flush();
+
+      assert.deepEqual(client.received(link)[0]?.frame, {
+        t: "welcome",
+        v: 1,
+        session: (client.received(link)[0]!.frame as { session: string }).session,
+        heartbeat: 4000,
+      });
+    });
+
+    it("does not ask a client with a budget to ping", async () => {
+      const { connect } = await start();
+      const client = fakeClient();
+      const link = connect();
+
+      link.push(client.hello({ budget: 5000 }));
+      await flush();
+
+      const welcome = client.received(link)[0]?.frame as Record<string, unknown>;
+      assert.equal("heartbeat" in welcome, false);
+    });
+
+    it("records what the hello says about the device and its app instances", async () => {
+      const { kakao, connect } = await start();
+      const client = fakeClient();
+      const link = connect();
+
+      link.push(
+        client.hello({
+          device: { id: "phone", name: "Galaxy", platform: "android" },
+          client: { name: "rk-android", version: "2.0" },
+          caps: ["room.send", "room.icon"],
+          appInstances: [{ id: "a", me: { id: "u1", name: "Ann" } }, { id: "b" }],
+        }),
+      );
+      await flush();
+
+      const device = kakao.devices.get("phone")! as DeviceState;
+      assert.deepEqual(
+        [device.name, device.platform, device.client, device.protocolVersion, device.described],
+        ["Galaxy", "android", { name: "rk-android", version: "2.0" }, 1, true],
+      );
+      assert.deepEqual([...device.capabilities], ["room.send", "room.icon"]);
+      assert.deepEqual(
+        device.appInstances.map((a) => [a.id, a.me?.id, a.me?.name, a.me?.isMe]),
+        [
+          ["a", "u1", "Ann", true],
+          ["b", undefined, undefined, undefined],
+        ],
+      );
+    });
+
+    it("forgets the capabilities of the last session when the device connects again", async () => {
+      const { kakao, connect } = await start();
+      const first = fakeClient({ salt: Buffer.alloc(16, 1) });
+      const second = fakeClient({ salt: Buffer.alloc(16, 2) });
+
+      connect().push(first.hello({ caps: ["room.send", "room.icon"] }));
+      await flush();
+      connect().push(second.hello({ caps: ["room.send"] }));
+      await flush();
+
+      assert.deepEqual(
+        [...(kakao.devices.get("phone") as DeviceState).capabilities],
+        ["room.send"],
+      );
+    });
+
+    it("writes the requests that waited for the device after the welcome", async () => {
+      const { kakao, connect } = await start();
+      const client = fakeClient();
+      const room = kakao.room(REF_OF_PHONE);
+      const call = room.markRead().catch(() => {});
+      const link = connect();
+
+      link.push(client.hello({ caps: ["room.markRead"] }));
+      await flush();
+
+      assert.deepEqual(
+        client.received(link).map((opened) => opened?.frame.t),
+        ["welcome", "req"],
+      );
+      assert.equal(kakao.devices.get("phone")?.status, "online");
+      (kakao.devices.get("phone") as DeviceState).rejectAll(new RKError("CLOSED", "closed"));
+      await call;
+    });
+
+    it("has the session open when deviceConnect is emitted", async () => {
+      const { kakao, connect } = await start();
+      const statuses: string[] = [];
+      kakao.on("deviceConnect", (device) => void statuses.push(device.status));
+
+      connect().push(fakeClient().hello());
+      await flush();
+
+      assert.deepEqual(statuses, ["online"]);
+    });
+
+    it("tells the client it can end the session when there is nothing for it to do", async () => {
+      const { connect } = await start();
+      const client = fakeClient();
+      const link = connect();
+
+      link.push(client.hello());
+      await flush();
+
+      assert.deepEqual(
+        client.received(link).map((opened) => opened?.frame.t),
+        ["welcome", "idle"],
+      );
+    });
+  });
+
+  describe("refused", () => {
+    it("answers a version it does not speak with a reject, and closes the link", async () => {
+      const { kakao, connect, connected } = await start();
+      const client = fakeClient();
+      const link = connect();
+
+      link.push(client.hello({ v: 9 }));
+      await flush();
+
+      assert.deepEqual(client.received(link)[0]?.frame, {
+        t: "reject",
+        code: "PROTOCOL_MISMATCH",
+        message: "server speaks v1",
+      });
+      assert.equal(client.received(link)[0]?.counter, 0n);
+      assert.deepEqual(link.closed, ["PROTOCOL_MISMATCH"]);
+      assert.equal(kakao.devices.size, 0);
+      assert.deepEqual(connected, []);
+    });
+
+    it("answers a plain hello with a plain reject when there is no auth", async () => {
+      const { connect } = await start({ auth: false });
+      const client = fakeClient({ token: undefined });
+      const link = connect();
+
+      link.push(client.hello({ v: 9 }));
+      await flush();
+
+      assert.equal(client.received(link)[0]?.frame.t, "reject");
+      assert.equal(client.received(link)[0]?.sealed, false);
+    });
+
+    it("says nothing and closes the link for a hello it has seen before", async () => {
+      const { connect } = await start();
+      const client = fakeClient();
+      const hello = client.hello();
+      connect().push(hello);
+      await flush();
+      const replay = connect();
+
+      replay.push(hello);
+      await flush();
+
+      assert.deepEqual(replay.written, []);
+      assert.deepEqual(replay.closed, ["AUTH_FAILED"]);
+    });
+
+    it("rejects a device that verify does not allow, and gives verify what the hello said", async () => {
+      const seen: unknown[] = [];
+      const { kakao, connect } = await start({
+        auth: {
+          token: "secret",
+          verify: (hello) => {
+            seen.push(hello.device.id, hello.transport);
+            return false;
+          },
+        },
+      });
+      const client = fakeClient();
+      const link = connect();
+
+      link.push(client.hello());
+      await flush();
+
+      assert.deepEqual(seen, ["phone", "fake"]);
+      assert.deepEqual(client.received(link)[0]?.frame, {
+        t: "reject",
+        code: "AUTH_FAILED",
+        message: "rejected by verify",
+      });
+      assert.deepEqual(link.closed, ["AUTH_FAILED"]);
+      assert.equal(kakao.devices.size, 0);
+    });
+
+    it("reports an error of verify as an error of the device, and rejects the device", async () => {
+      const { connect, errors } = await start({
+        auth: {
+          token: "secret",
+          verify: () => {
+            throw new Error("database down");
+          },
+        },
+      });
+      const client = fakeClient();
+      const link = connect();
+
+      link.push(client.hello());
+      await flush();
+
+      assert.deepEqual(
+        errors.map((report) => [report.source, (report.error as Error).message]),
+        [["device", "database down"]],
+      );
+      assert.equal(client.received(link)[0]?.frame.t, "reject");
+    });
+
+    it("closes the link when the device has no token", async () => {
+      const { connect } = await start({ auth: { token: () => undefined } });
+      const link = connect();
+
+      link.push(fakeClient().hello());
+      await flush();
+
+      assert.deepEqual(link.written, []);
+      assert.deepEqual(link.closed, ["AUTH_FAILED"]);
+    });
+
+    it("asks for the token of the device by its id", async () => {
+      const asked: string[] = [];
+      const { connect } = await start({
+        auth: {
+          token: (device) => {
+            asked.push(device);
+            return "secret";
+          },
+        },
+      });
+
+      connect().push(fakeClient({ device: "tablet" }).hello());
+      await flush();
+
+      assert.deepEqual(asked, ["tablet"]);
+    });
+
+    it("leaves a link open that sends what does not open, such as a frame sealed with another token", async () => {
+      const { connect, kakao } = await start();
+      const link = connect();
+
+      link.push(fakeClient({ token: "other" }).hello());
+      await flush();
+
+      assert.deepEqual(link.written, []);
+      assert.deepEqual(link.closed, []);
+      assert.equal(kakao.devices.size, 0);
+    });
+
+    it("closes the link when the first frame is not a hello", async () => {
+      const { connect } = await start();
+      const link = connect();
+
+      link.push(fakeClient().seal({ t: "ping" }));
+      await flush();
+
+      assert.deepEqual(link.closed, ["PROTOCOL_ERROR"]);
+    });
+
+    it("ignores a second hello on a link that has a session", async () => {
+      const { connect, connected } = await start();
+      const client = fakeClient();
+      const link = connect();
+
+      link.push(client.hello());
+      link.push(client.hello());
+      await flush();
+
+      assert.equal(connected.length, 1);
+      assert.deepEqual(link.closed, []);
+      assert.deepEqual(
+        client.received(link).map((opened) => opened?.frame.t),
+        ["welcome", "idle"],
+      );
+    });
+  });
+
+  describe("session end", () => {
+    it("tells with deviceDisconnect when the link ends", async () => {
+      const { kakao, connect, disconnected } = await start();
+      const link = connect();
+      link.push(fakeClient().hello());
+      await flush();
+
+      link.end();
+      await flush();
+
+      const device = kakao.devices.get("phone")!;
+      assert.deepEqual(disconnected, [{ device, error: undefined }]);
+      assert.equal(device.status, "offline");
+      assert.equal(device.session, undefined);
+    });
+
+    it("tells with the error, and reports it, when the link breaks", async () => {
+      const { connect, disconnected, errors } = await start();
+      const link = connect();
+      link.push(fakeClient().hello());
+      await flush();
+      const failure = new Error("connection reset");
+
+      link.fail(failure);
+      await flush();
+
+      assert.equal(disconnected.length, 1);
+      assert.ok(isRKError(disconnected[0]?.error, "PROTOCOL_ERROR"));
+      assert.equal(disconnected[0]?.error?.cause, failure);
+      assert.deepEqual(
+        errors.map((report) => [report.source, report.error, report.device?.id]),
+        [["transport", failure, "phone"]],
+      );
+    });
+
+    it("does not tell about a link that never got a session", async () => {
+      const { connect, disconnected } = await start();
+      const link = connect();
+
+      link.end();
+      await flush();
+
+      assert.deepEqual(disconnected, []);
+    });
+
+    it("moves to a new session when the device connects again, and closes the old link", async () => {
+      const { kakao, connect, connected, disconnected } = await start();
+      const first = fakeClient({ salt: Buffer.alloc(16, 1) });
+      const second = fakeClient({ salt: Buffer.alloc(16, 2) });
+      const oldLink = connect();
+      oldLink.push(first.hello({ caps: ["room.markRead"] }));
+      await flush();
+      const device = kakao.devices.get("phone") as DeviceState;
+      const call = kakao
+        .room(REF_OF_PHONE)
+        .markRead()
+        .catch(() => {});
+      await flush();
+      const newLink = connect();
+
+      newLink.push(second.hello({ caps: ["room.markRead"] }));
+      await flush();
+
+      assert.deepEqual(oldLink.closed, ["replaced by a new session"]);
+      assert.deepEqual(disconnected, [{ device, error: undefined }]);
+      assert.equal(connected.length, 2);
+      assert.equal(device.status, "online");
+      const requestOn = (client: ReturnType<typeof fakeClient>, link: typeof newLink) =>
+        client.received(link).filter((opened) => opened?.frame.t === "req");
+      assert.equal(requestOn(first, oldLink).length, 1);
+      assert.deepEqual(
+        requestOn(second, newLink).map((opened) => (opened!.frame as { id: string }).id),
+        requestOn(first, oldLink).map((opened) => (opened!.frame as { id: string }).id),
+      );
+      device.rejectAll(new RKError("CLOSED", "closed"));
+      await call;
+    });
+
+    it("tells that the old session ended before the new one started", async () => {
+      const { kakao, connect } = await start();
+      const events: string[] = [];
+      kakao.on("deviceConnect", () => void events.push("connect"));
+      kakao.on("deviceDisconnect", () => void events.push("disconnect"));
+      connect().push(fakeClient({ salt: Buffer.alloc(16, 1) }).hello());
+      await flush();
+
+      connect().push(fakeClient({ salt: Buffer.alloc(16, 2) }).hello());
+      await flush();
+
+      assert.deepEqual(events, ["connect", "disconnect", "connect"]);
+    });
+
+    it("does not disconnect the new session when the old link ends afterwards", async () => {
+      const { kakao, connect, disconnected } = await start();
+      const oldLink = connect();
+      oldLink.push(fakeClient({ salt: Buffer.alloc(16, 1) }).hello());
+      await flush();
+      connect().push(fakeClient({ salt: Buffer.alloc(16, 2) }).hello());
+      await flush();
+
+      oldLink.end();
+      await flush();
+
+      assert.equal(disconnected.length, 1);
+      assert.equal(kakao.devices.get("phone")?.status, "online");
     });
   });
 });
