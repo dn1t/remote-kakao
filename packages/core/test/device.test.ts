@@ -3,12 +3,12 @@ import { getEventListeners } from "node:events";
 import { afterEach, describe, it, mock } from "node:test";
 
 import type { SessionKeys } from "../src/device.ts";
-import { DeviceState, MAX_SEEN_EVENTS, SessionState } from "../src/device.ts";
-import type { DeviceContext } from "../src/device.ts";
+import { MAX_SEEN_EVENTS, SessionState } from "../src/device.ts";
 import { isRKError, RKError } from "../src/errors.ts";
-import type { AnyFrame, RequestFrame } from "../src/protocol.ts";
+import type { AnyFrame } from "../src/protocol.ts";
 import { deriveKey, Direction, openFrame } from "../src/seal.ts";
 import type { AppInstance, Link } from "../src/types.ts";
+import { fakeLink, newDevice, plainSession, settled } from "./fakes.ts";
 
 const SALT = Buffer.from("000102030405060708090a0b0c0d0e0f", "hex");
 const KEYS: SessionKeys = {
@@ -16,25 +16,6 @@ const KEYS: SessionKeys = {
   up: deriveKey("token", SALT, Direction.Up),
   down: deriveKey("token", SALT, Direction.Down),
 };
-
-/** Link that records what is written to it. `failNext` makes the next writes reject. */
-function fakeLink(): Link & { written: Uint8Array[]; failNext: Error[] } {
-  const written: Uint8Array[] = [];
-  const failNext: Error[] = [];
-  return {
-    remoteAddress: "10.0.0.2:5000",
-    reliable: true,
-    frames: (async function* () {})(),
-    written,
-    failNext,
-    async send(frame) {
-      const error = failNext.shift();
-      if (error) throw error;
-      written.push(frame);
-    },
-    close() {},
-  };
-}
 
 function newSession(
   options: { keys?: SessionKeys | undefined; budget?: number; link?: Link } = {},
@@ -269,44 +250,6 @@ describe("SessionState", () => {
   });
 });
 
-/** A device whose context records the calls it gets. */
-function newDevice(options: { requestTimeout?: number } = {}) {
-  let nextId = 1;
-  const pendingChanges: number[] = [];
-  const errors: unknown[] = [];
-  const ctx: DeviceContext = {
-    requestTimeout: options.requestTimeout ?? 30_000,
-    nextRequestId: () => `r${nextId++}`,
-    onPendingChange: (device) => pendingChanges.push(device.pendingCount),
-    reportDeviceError: (_device, error) => errors.push(error),
-  };
-  const device = new DeviceState(
-    { id: "phone", name: "Phone", platform: "ios", client: { name: "test", version: "1" } },
-    ctx,
-  );
-  return { device, pendingChanges, errors };
-}
-
-/**
- * Plain session (no keys) over a fake link. `reliable: false` makes the core retransmit.
- * `sent()` returns the requests written to the link so far.
- */
-function plainSession(reliable = true) {
-  const link = { ...fakeLink(), reliable };
-  const session = newSession({ keys: undefined, link });
-  const sent = () =>
-    link.written
-      .map((bytes) => openFrame(bytes)?.frame)
-      .filter((f) => f?.t === "req") as RequestFrame[];
-  return { session, link, sent };
-}
-
-const settled = (promise: Promise<unknown>) =>
-  promise.then(
-    (value) => ({ value }),
-    (error: unknown) => ({ error }),
-  );
-
 describe("DeviceState", () => {
   afterEach(() => mock.timers.reset());
 
@@ -329,6 +272,7 @@ describe("DeviceState", () => {
 
     it("tells what it supports and finds app instances by id", () => {
       const { device } = newDevice();
+      assert.equal(device.described, false);
       device.capabilities.add("room.send");
       const appInstance = { id: "kakao" } as AppInstance;
       device.appInstances = [appInstance];

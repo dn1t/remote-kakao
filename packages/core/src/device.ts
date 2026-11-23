@@ -238,6 +238,8 @@ export class DeviceState implements Device {
   client: { readonly name: string; readonly version: string };
   /** Protocol version from the latest handshake. `0` before the first. */
   protocolVersion = 0;
+  /** Whether the device has completed a handshake. Until then `capabilities` is empty, which does not mean the device lacks them. */
+  described = false;
   readonly capabilities = new Set<Capability>();
   /** App instances from the latest handshake. */
   appInstances: readonly AppInstance[] = [];
