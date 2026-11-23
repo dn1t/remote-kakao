@@ -5,9 +5,9 @@ import { decodeRef, encodeRef } from "../src/convert.ts";
 import type { RoomLocation } from "../src/convert.ts";
 
 const LOCATION: RoomLocation = {
-  deviceId: "phone",
-  accountId: "com.kakao.talk/0",
-  roomId: "4794483397574872",
+  device: "phone",
+  appInstance: "com.kakao.talk/0",
+  room: "4794483397574872",
 };
 
 /** Encodes `value` as the text that `decodeRef` reads, to build refs that `encodeRef` never makes. */
@@ -27,9 +27,9 @@ describe("encodeRef", () => {
   it("uses only URL-safe characters", () => {
     for (let index = 0; index < 500; index++) {
       const ref = encodeRef({
-        deviceId: `d${index}`,
-        accountId: `계정${index}`,
-        roomId: `?>${index}`,
+        device: `d${index}`,
+        appInstance: `계정${index}`,
+        room: `?>${index}`,
       });
 
       assert.match(ref, /^[A-Za-z0-9_-]+$/);
@@ -39,11 +39,11 @@ describe("encodeRef", () => {
   it("gives different refs for different rooms", () => {
     const refs = new Set([
       encodeRef(LOCATION),
-      encodeRef({ ...LOCATION, deviceId: "tablet" }),
-      encodeRef({ ...LOCATION, accountId: "com.kakao.talk/10" }),
-      encodeRef({ ...LOCATION, roomId: "1" }),
-      encodeRef({ deviceId: "a", accountId: "bc", roomId: "d" }),
-      encodeRef({ deviceId: "ab", accountId: "c", roomId: "d" }),
+      encodeRef({ ...LOCATION, device: "tablet" }),
+      encodeRef({ ...LOCATION, appInstance: "com.kakao.talk/10" }),
+      encodeRef({ ...LOCATION, room: "1" }),
+      encodeRef({ device: "a", appInstance: "bc", room: "d" }),
+      encodeRef({ device: "ab", appInstance: "c", room: "d" }),
     ]);
 
     assert.equal(refs.size, 6);
@@ -57,10 +57,10 @@ describe("decodeRef", () => {
 
   it("reads back ids with any characters", () => {
     const locations: RoomLocation[] = [
-      { deviceId: "폰 📱", accountId: "계정/0", roomId: "방" },
-      { deviceId: 'with "quotes"', accountId: "a,b", roomId: "]" },
-      { deviceId: "", accountId: "", roomId: "" },
-      { deviceId: "x".repeat(300), accountId: "\n\t", roomId: "\u0000" },
+      { device: "폰 📱", appInstance: "계정/0", room: "방" },
+      { device: 'with "quotes"', appInstance: "a,b", room: "]" },
+      { device: "", appInstance: "", room: "" },
+      { device: "x".repeat(300), appInstance: "\n\t", room: "\u0000" },
     ];
 
     for (const location of locations) {

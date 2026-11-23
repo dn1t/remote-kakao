@@ -43,7 +43,7 @@ const hello: Hello = {
   device: { id: "phone", name: "Phone", platform: "ios" },
   client: { name: "test", version: "0.0.0" },
   caps: [],
-  accounts: [],
+  appInstances: [],
 };
 
 const welcome: Welcome = { t: "welcome", v: PROTOCOL_VERSION, session: "s1" };

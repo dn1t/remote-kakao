@@ -102,7 +102,7 @@ describe("events", () => {
     assert.deepEqual([typeof onMessage, typeof onClicked, typeof wrong], Array(3).fill("function"));
   });
 
-  it("wrap an extension payload with its device and account", () => {
+  it("wrap an extension payload with its device and app instance", () => {
     type Clicked = EventPayload<"test:clicked">;
     const same: Clicked = null as unknown as ExtensionEvent<{ room: string; user: string }>;
 
@@ -179,7 +179,7 @@ describe("plain data", () => {
     const room: RoomData = {
       ref: "r",
       id: "1",
-      account: "a",
+      appInstance: "a",
       device: "d",
       type: "group",
       isGroup: true,
@@ -202,7 +202,7 @@ describe("plain data", () => {
 
   it("uses the renamed and removed fields", () => {
     // @ts-expect-error `kind` was renamed to `type`
-    const room: RoomData = { ref: "r", id: "1", account: "a", device: "d", kind: "group" };
+    const room: RoomData = { ref: "r", id: "1", appInstance: "a", device: "d", kind: "group" };
 
     assert.ok(room);
   });

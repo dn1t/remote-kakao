@@ -54,14 +54,14 @@ export type Platform = "android" | "ios" | "macos" | "windows" | (string & Recor
 /** Identifies a device. Chosen by the client and kept across restarts. */
 export type DeviceId = string;
 
-/** Identifies an account signed in on a client. */
-export type AccountId = string;
+/** Identifies a KakaoTalk app instance on a client. */
+export type AppInstanceId = string;
 
-/** Identifies a room. Unique within an account. */
+/** Identifies a room. Unique within an app instance. */
 export type RoomId = string; // unverified
 
 /**
- * Identifies a user. Unique within an account.
+ * Identifies a user. Unique within an app instance.
  *
  * The value may depend on the client's platform,
  * so the same user can have different ids on different clients.
@@ -83,9 +83,9 @@ export interface WireUser {
   name: string;
 }
 
-/** KakaoTalk account signed in on a client. */
-export interface WireAccount {
-  id: AccountId;
+/** KakaoTalk app instance on a client. */
+export interface WireAppInstance {
+  id: AppInstanceId;
   me?: WireUser;
 }
 
@@ -146,7 +146,7 @@ export type WireContent =
 
 /** Identifies a room */
 interface RoomRef {
-  account: AccountId;
+  appInstance: AppInstanceId;
   room: RoomId;
 }
 
@@ -168,14 +168,17 @@ export interface Methods {
   };
   "room.markRead": { params: RoomRef; result: Record<string, never> };
   "room.icon": { params: RoomRef; result: { image?: WireBlob } };
-  "room.list": { params: { account: AccountId }; result: { rooms: WireRoom[] } }; // unverified
+  "room.list": { params: { appInstance: AppInstanceId }; result: { rooms: WireRoom[] } }; // unverified
   "room.members": { params: RoomRef; result: { users: WireUser[] } }; // unverified
   "room.history": {
     /** `before` is a message id. Pages go from newest to oldest. */
     params: RoomRef & { before?: MessageId; limit: number };
     result: { messages: WireMessage[] };
   }; // unverified
-  "user.avatar": { params: { account: AccountId; user: UserId }; result: { image?: WireBlob } };
+  "user.avatar": {
+    params: { appInstance: AppInstanceId; user: UserId };
+    result: { image?: WireBlob };
+  };
   /** Needs `message.attachments`. `index` is the position in `WireMessage.attachments`, starting at 0. */
   "attachment.fetch": {
     params: RoomRef & { message: MessageId; index: number };
@@ -207,7 +210,7 @@ export interface Hello {
   device: { id: DeviceId; name: string; platform: Platform };
   client: { name: string; version: string };
   caps: Capability[];
-  accounts: WireAccount[];
+  appInstances: WireAppInstance[];
   /** Ms this session can last. Omitted for persistent clients. */
   budget?: number;
 }
@@ -261,7 +264,7 @@ interface EventFrameOf<N extends WireEventName, D> {
    */
   id: EventId;
   name: N;
-  account?: AccountId;
+  appInstance?: AppInstanceId;
   data: D;
   /** Set when the event is being resent after waiting in the outbox. Becomes `msg.replayed` in the exposed API. */
   replay?: true;

@@ -34,7 +34,7 @@ export function deriveKey(token: string, salt: Uint8Array, direction: Direction)
 /** Device and direction of a frame. Both stay readable without the key. */
 export interface PlainParams {
   direction: Direction;
-  deviceId: DeviceId;
+  device: DeviceId;
 }
 
 /** Params needed to seal a frame. */
@@ -58,14 +58,14 @@ export interface SealedParams extends PlainParams {
  * device id, JSON.
  */
 export function sealFrame(frame: AnyFrame, params: PlainParams | SealedParams): Uint8Array {
-  const deviceId = Buffer.from(params.deviceId, "utf8");
-  if (deviceId.length > MAX_DEVICE_ID_LENGTH) {
+  const deviceBytes = Buffer.from(params.device, "utf8");
+  if (deviceBytes.length > MAX_DEVICE_ID_LENGTH) {
     throw new RangeError(`device id is longer than ${MAX_DEVICE_ID_LENGTH} bytes`);
   }
   const json = Buffer.from(JSON.stringify(frame), "utf8");
 
   if (!("key" in params)) {
-    return Buffer.concat([header(VERSION_PLAIN, params.direction, deviceId), json]);
+    return Buffer.concat([header(VERSION_PLAIN, params.direction, deviceBytes), json]);
   }
 
   const { direction, salt, counter, key } = params;
@@ -73,15 +73,15 @@ export function sealFrame(frame: AnyFrame, params: PlainParams | SealedParams): 
   const counterBytes = Buffer.alloc(COUNTER_LENGTH);
   counterBytes.writeBigUInt64BE(counter);
 
-  const aad = Buffer.concat([header(VERSION_SEALED, direction, deviceId), salt, counterBytes]);
+  const aad = Buffer.concat([header(VERSION_SEALED, direction, deviceBytes), salt, counterBytes]);
   const cipher = createCipheriv("aes-256-gcm", key, nonce(counter));
   cipher.setAAD(aad);
   const ciphertext = Buffer.concat([cipher.update(json), cipher.final()]);
   return Buffer.concat([aad, ciphertext, cipher.getAuthTag()]);
 }
 
-function header(version: number, direction: Direction, deviceId: Buffer): Buffer {
-  return Buffer.concat([Buffer.from([version, direction, deviceId.length]), deviceId]);
+function header(version: number, direction: Direction, deviceBytes: Buffer): Buffer {
+  return Buffer.concat([Buffer.from([version, direction, deviceBytes.length]), deviceBytes]);
 }
 
 /** Four zero bytes, then the counter. A key never sees the same counter twice, so nonces never repeat. */
@@ -96,7 +96,7 @@ export interface FrameHeader {
   /** `false` for a plain frame (`auth: false`). */
   sealed: boolean;
   direction: Direction;
-  deviceId: DeviceId;
+  device: DeviceId;
   /** Empty for a plain frame. */
   salt: Uint8Array;
 }
@@ -116,8 +116,8 @@ export interface OpenedFrame extends FrameHeader {
 export function peekHeader(bytes: Uint8Array): FrameHeader | undefined {
   const header = readHeader(view(bytes));
   if (!header) return undefined;
-  const { sealed, direction, deviceId, salt } = header;
-  return { sealed, direction, deviceId, salt };
+  const { sealed, direction, device, salt } = header;
+  return { sealed, direction, device, salt };
 }
 
 /**
@@ -135,11 +135,11 @@ export function openFrame(bytes: Uint8Array, key?: Uint8Array): OpenedFrame | un
   const buf = view(bytes);
   const header = readHeader(buf);
   if (!header || header.sealed !== (key !== undefined)) return undefined;
-  const { sealed, direction, deviceId, salt, end } = header;
+  const { sealed, direction, device, salt, end } = header;
 
   if (key === undefined) {
     const frame = parseFrame(buf.subarray(end));
-    return frame && { sealed, direction, deviceId, salt, counter: 0n, frame };
+    return frame && { sealed, direction, device, salt, counter: 0n, frame };
   }
 
   const cipherStart = end + COUNTER_LENGTH;
@@ -156,7 +156,7 @@ export function openFrame(bytes: Uint8Array, key?: Uint8Array): OpenedFrame | un
     return undefined;
   }
   const frame = parseFrame(json);
-  return frame && { sealed, direction, deviceId, salt, counter, frame };
+  return frame && { sealed, direction, device, salt, counter, frame };
 }
 
 /** Frame types the receiver knows. A frame of any other type is refused. */
@@ -193,20 +193,20 @@ function readHeader(buf: Buffer): ParsedHeader | undefined {
   if (version !== VERSION_PLAIN && version !== VERSION_SEALED) return undefined;
   if (direction !== Direction.Up && direction !== Direction.Down) return undefined;
   if (buf.length < idEnd) return undefined;
-  let deviceId: string;
+  let device: string;
   try {
-    deviceId = utf8.decode(buf.subarray(3, idEnd));
+    device = utf8.decode(buf.subarray(3, idEnd));
   } catch {
     return undefined;
   }
 
   if (version === VERSION_PLAIN) {
-    return { sealed: false, direction, deviceId, salt: new Uint8Array(0), end: idEnd };
+    return { sealed: false, direction, device, salt: new Uint8Array(0), end: idEnd };
   }
   const end = idEnd + SALT_LENGTH;
   if (buf.length < end) return undefined;
   const salt = new Uint8Array(buf.subarray(idEnd, end));
-  return { sealed: true, direction, deviceId, salt, end };
+  return { sealed: true, direction, device, salt, end };
 }
 
 function parseFrame(json: Uint8Array): AnyFrame | undefined {

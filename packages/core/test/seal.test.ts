@@ -101,11 +101,11 @@ function decrypt(bytes: Uint8Array, key: Uint8Array): string {
   return Buffer.concat([plain, decipher.final()]).toString("utf8");
 }
 
-function seal(frame: AnyFrame, overrides: { deviceId?: string; counter?: bigint } = {}) {
+function seal(frame: AnyFrame, overrides: { device?: string; counter?: bigint } = {}) {
   return Buffer.from(
     sealFrame(frame, {
       direction: Direction.Up,
-      deviceId: overrides.deviceId ?? "phone",
+      device: overrides.device ?? "phone",
       salt: SALT,
       counter: overrides.counter ?? 0n,
       key: KEY,
@@ -116,13 +116,13 @@ function seal(frame: AnyFrame, overrides: { deviceId?: string; counter?: bigint 
 describe("sealFrame, plain", () => {
   // Fixed vector for the other clients.
   it("writes the header and then the JSON", () => {
-    const bytes = sealFrame(PING, { direction: Direction.Up, deviceId: "phone" });
+    const bytes = sealFrame(PING, { direction: Direction.Up, device: "phone" });
 
     assert.equal(Buffer.from(bytes).toString("hex"), "00000570686f6e657b2274223a2270696e67227d");
   });
 
   it("puts the direction in the second byte", () => {
-    const bytes = sealFrame(PING, { direction: Direction.Down, deviceId: "phone" });
+    const bytes = sealFrame(PING, { direction: Direction.Down, device: "phone" });
 
     assert.equal(bytes[1], 1);
   });
@@ -166,7 +166,7 @@ describe("sealFrame, sealed", () => {
   });
 
   it("measures the device id in bytes, not characters", () => {
-    const bytes = seal(PING, { deviceId: "폰" });
+    const bytes = seal(PING, { device: "폰" });
 
     assert.equal(bytes[2], 3);
     assert.equal(bytes.toString("utf8", 3, 6), "폰");
@@ -201,16 +201,16 @@ describe("sealFrame, sealed", () => {
 
 describe("sealFrame, invalid input", () => {
   it("accepts a device id of 255 bytes and rejects 256", () => {
-    assert.equal(seal(PING, { deviceId: "a".repeat(255) })[2], 255);
-    assert.throws(() => seal(PING, { deviceId: "a".repeat(256) }), RangeError);
+    assert.equal(seal(PING, { device: "a".repeat(255) })[2], 255);
+    assert.throws(() => seal(PING, { device: "a".repeat(256) }), RangeError);
     assert.throws(
-      () => sealFrame(PING, { direction: Direction.Up, deviceId: "a".repeat(256) }),
+      () => sealFrame(PING, { direction: Direction.Up, device: "a".repeat(256) }),
       RangeError,
     );
   });
 
   it("rejects a salt that is not 16 bytes", () => {
-    const params = { direction: Direction.Up, deviceId: "phone", counter: 0n, key: KEY };
+    const params = { direction: Direction.Up, device: "phone", counter: 0n, key: KEY };
 
     assert.throws(() => sealFrame(PING, { ...params, salt: SALT.subarray(0, 15) }), RangeError);
   });
@@ -221,7 +221,7 @@ describe("sealFrame, invalid input", () => {
   });
 
   it("rejects a key that is not 32 bytes", () => {
-    const params = { direction: Direction.Up, deviceId: "phone", salt: SALT, counter: 0n };
+    const params = { direction: Direction.Up, device: "phone", salt: SALT, counter: 0n };
 
     assert.throws(() => sealFrame(PING, { ...params, key: KEY.subarray(0, 16) }), RangeError);
   });
@@ -235,7 +235,7 @@ const FRAMES: AnyFrame[] = [
     device: { id: "phone", name: "Phone", platform: "ios" },
     client: { name: "test", version: "1" },
     caps: ["room.send"],
-    accounts: [],
+    appInstances: [],
   },
   { t: "welcome", v: 1, session: "s1" },
   { t: "event", id: "boot-1", name: "message", data: null as never },
@@ -246,8 +246,8 @@ const FRAMES: AnyFrame[] = [
   { t: "bye", reason: "done" },
 ];
 
-function plain(frame: AnyFrame, deviceId = "phone"): Buffer {
-  return Buffer.from(sealFrame(frame, { direction: Direction.Up, deviceId }));
+function plain(frame: AnyFrame, device = "phone"): Buffer {
+  return Buffer.from(sealFrame(frame, { direction: Direction.Up, device }));
 }
 
 describe("peekHeader", () => {
@@ -255,7 +255,7 @@ describe("peekHeader", () => {
     assert.deepEqual(peekHeader(seal(PING)), {
       sealed: true,
       direction: Direction.Up,
-      deviceId: "phone",
+      device: "phone",
       salt: new Uint8Array(SALT),
     });
   });
@@ -264,13 +264,13 @@ describe("peekHeader", () => {
     assert.deepEqual(peekHeader(plain(PING, "폰")), {
       sealed: false,
       direction: Direction.Up,
-      deviceId: "폰",
+      device: "폰",
       salt: new Uint8Array(0),
     });
   });
 
   it("needs only the bytes up to the end of the salt", () => {
-    assert.equal(peekHeader(seal(PING).subarray(0, 3 + 5 + 16))?.deviceId, "phone");
+    assert.equal(peekHeader(seal(PING).subarray(0, 3 + 5 + 16))?.device, "phone");
   });
 
   it("returns undefined for a header that is cut short", () => {
@@ -316,12 +316,12 @@ describe("openFrame, sealed", () => {
   });
 
   it("returns the header and the counter along with the frame", () => {
-    const opened = openFrame(seal(PING, { deviceId: "폰", counter: 0x0102030405060708n }), KEY);
+    const opened = openFrame(seal(PING, { device: "폰", counter: 0x0102030405060708n }), KEY);
 
     assert.deepEqual(opened, {
       sealed: true,
       direction: Direction.Up,
-      deviceId: "폰",
+      device: "폰",
       salt: new Uint8Array(SALT),
       counter: 0x0102030405060708n,
       frame: PING,
@@ -338,7 +338,7 @@ describe("openFrame, sealed", () => {
 
     assert.deepEqual(opened?.frame, PING);
     assert.equal(opened?.counter, 0n);
-    assert.equal(opened?.deviceId, "phone");
+    assert.equal(opened?.device, "phone");
   });
 
   it("opens bytes that are a view into a larger buffer", () => {
@@ -402,7 +402,7 @@ describe("openFrame, plain", () => {
     assert.deepEqual(openFrame(plain(PING, "폰")), {
       sealed: false,
       direction: Direction.Up,
-      deviceId: "폰",
+      device: "폰",
       salt: new Uint8Array(0),
       counter: 0n,
       frame: PING,

@@ -1,6 +1,6 @@
 import type { RKError } from "./errors.ts";
 import type {
-  AccountId,
+  AppInstanceId,
   Capability,
   DeviceId,
   MessageId,
@@ -98,9 +98,9 @@ export interface UserData {
   name: string;
 }
 
-/** Account as plain data, which can be serialized as JSON. */
-export interface AccountData {
-  id: AccountId;
+/** App instance as plain data, which can be serialized as JSON. */
+export interface AppInstanceData {
+  id: AppInstanceId;
   me?: UserData;
 }
 
@@ -109,9 +109,9 @@ export interface RoomData {
   /** Encoded string that identifies the room across restarts. */
   ref: string;
   id: RoomId;
-  /** Id of the account the room belongs to. */
-  account: AccountId;
-  /** Id of the device the account is on. */
+  /** Id of the app instance the room belongs to. */
+  appInstance: AppInstanceId;
+  /** Id of the device the app instance is on. */
   device: DeviceId;
   name?: string;
   isGroup?: boolean;
@@ -152,7 +152,7 @@ export interface DeviceHello {
   readonly client: { readonly name: string; readonly version: string };
   readonly protocolVersion: number;
   readonly capabilities: readonly Capability[];
-  readonly accounts: readonly AccountData[];
+  readonly appInstances: readonly AppInstanceData[];
   /** Ms the session can last. `undefined` for clients that stay connected. */
   readonly budget: number | undefined;
   /** Name of the transport the device connected through. */
@@ -208,14 +208,14 @@ export interface Device {
   /** Protocol version from the latest handshake. */
   readonly protocolVersion: number;
   readonly capabilities: ReadonlySet<Capability>;
-  readonly accounts: readonly Account[];
+  readonly appInstances: readonly AppInstance[];
   readonly session: DeviceSession | undefined;
   /** When a session with the device last started or ended. `undefined` if it never connected. */
   readonly lastSeenAt: Date | undefined;
 
   /** Whether the device supports the capability. */
   supports(capability: Capability): boolean;
-  account(id: AccountId): Account | undefined;
+  appInstance(id: AppInstanceId): AppInstance | undefined;
   /** Round-trip time in ms. */
   ping(options?: RequestOptions): Promise<number>;
   /** Calls a method registered by a client-side extension. */
@@ -238,26 +238,29 @@ export interface DeviceSession {
   readonly expiresAt: Date | undefined;
 }
 
-/** KakaoTalk account signed in on a device. */
-export interface Account {
-  /** Unique within its device. The format depends on the client, e.g. `<package>/<android user>` on Android, the bundle id on iOS. */
-  readonly id: AccountId;
+/** KakaoTalk app on a device. A device can run several, e.g. in an Android work profile. */
+export interface AppInstance {
+  /**
+   * Identifies the app instance, not the user. Unique within its device.
+   * The format depends on the client, e.g. `<package>/<android user>` on Android, the bundle id on iOS.
+   */
+  readonly id: AppInstanceId;
   readonly device: Device;
-  /** The user this account is signed in as, if the client can tell. */
+  /** The user this app instance is signed in as, if the client can tell. */
   readonly me: User | undefined;
 
-  /** Room of this account with the given id. Does not ask the device. */
+  /** Room of this app instance with the given id. Does not ask the device. */
   room(id: RoomId): Room;
   /** Requires `room.list`. */
   rooms(options?: RequestOptions): Promise<Room[]>; // unverified
 }
 
-/** Chat room of an account. */
+/** Chat room of an app instance. */
 export interface Room {
   /** Encoded string that identifies the room across restarts. Keep it to get the same room again later. */
   readonly ref: string;
   readonly id: RoomId;
-  readonly account: Account;
+  readonly appInstance: AppInstance;
   readonly device: Device;
   /** Last known name. `undefined` until the device has described the room. */
   readonly name: string | undefined;
@@ -292,8 +295,8 @@ export interface Room {
 export interface User {
   readonly id: UserId;
   readonly name: string;
-  readonly account: Account;
-  /** `true` if this is the user the account is signed in as. */
+  readonly appInstance: AppInstance;
+  /** `true` if this is the user the app instance is signed in as. */
   readonly isMe: boolean;
 
   /** Requires `user.avatar`. */
@@ -422,8 +425,8 @@ export interface ExtensionEvents {}
 /** Payload of an extension event. */
 export interface ExtensionEvent<T> {
   readonly device: Device;
-  /** Account the event belongs to, if any. */
-  readonly account: Account | undefined;
+  /** App instance the event belongs to, if any. */
+  readonly appInstance: AppInstance | undefined;
   readonly data: T;
 }
 
