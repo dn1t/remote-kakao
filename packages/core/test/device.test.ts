@@ -238,6 +238,41 @@ describe("SessionState", () => {
     });
   });
 
+  describe("onEnd", () => {
+    it("calls the callbacks once when the session ends, in the order they were added", () => {
+      const session = newSession();
+      const calls: string[] = [];
+      session.onEnd(() => calls.push("a"));
+      session.onEnd(() => calls.push("b"));
+      assert.deepEqual(calls, []);
+
+      session.end();
+      session.end();
+
+      assert.deepEqual(calls, ["a", "b"]);
+    });
+
+    it("calls a callback at once when the session already ended", () => {
+      const session = newSession();
+      session.end();
+      const calls: string[] = [];
+
+      session.onEnd(() => calls.push("late"));
+
+      assert.deepEqual(calls, ["late"]);
+    });
+
+    it("has ended already when the callbacks run", () => {
+      const session = newSession();
+      let ended: boolean | undefined;
+      session.onEnd(() => (ended = session.ended));
+
+      session.end();
+
+      assert.equal(ended, true);
+    });
+  });
+
   describe("end", () => {
     it("marks the session as ended, and can be called again", () => {
       const session = newSession();
