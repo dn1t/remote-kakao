@@ -2,6 +2,9 @@ import { createCipheriv, createDecipheriv, hkdfSync } from "node:crypto";
 
 import type { AnyFrame, DeviceId } from "./protocol.ts";
 
+/** Start of the HKDF labels of the keys. Changing it changes every key. */
+const KEY_LABEL = "rk wire v1";
+
 /** The direction a frame travels. */
 export const Direction = {
   /** Device to Node. */
@@ -19,8 +22,8 @@ const COUNTER_LENGTH = 8;
 const TAG_LENGTH = 16;
 const NONCE_LENGTH = 12;
 const MAX_DEVICE_ID_LENGTH = 255;
-const INFO_UP = Buffer.from("rk wire v1 up");
-const INFO_DOWN = Buffer.from("rk wire v1 down");
+const INFO_UP = Buffer.from(`${KEY_LABEL} up`);
+const INFO_DOWN = Buffer.from(`${KEY_LABEL} down`);
 
 /**
  * Derives the key for one direction of a session from the shared token.
