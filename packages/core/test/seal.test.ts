@@ -3,7 +3,7 @@ import { createDecipheriv, createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 
 import type { AnyFrame } from "../src/protocol.ts";
-import { deriveKey, Direction, sealFrame } from "../src/seal.ts";
+import { deriveKey, Direction, openFrame, peekHeader, sealFrame } from "../src/seal.ts";
 
 /**
  * Own implementation of HKDF-SHA256 (RFC 5869), using only HMAC.
@@ -224,5 +224,200 @@ describe("sealFrame, invalid input", () => {
     const params = { direction: Direction.Up, deviceId: "phone", salt: SALT, counter: 0n };
 
     assert.throws(() => sealFrame(PING, { ...params, key: KEY.subarray(0, 16) }), RangeError);
+  });
+});
+
+const FRAMES: AnyFrame[] = [
+  {
+    t: "hello",
+    v: 1,
+    ts: 0,
+    device: { id: "phone", name: "Phone", platform: "ios" },
+    client: { name: "test", version: "1" },
+    caps: ["room.send"],
+    accounts: [],
+  },
+  { t: "welcome", v: 1, session: "s1" },
+  { t: "event", id: "boot-1", name: "message", data: null as never },
+  { t: "ack", ids: ["boot-1"] },
+  { t: "req", id: "q1", method: "room.send", params: { text: "안녕" }, ttl: 1000 },
+  { t: "res", id: "q1", ok: false, error: { code: "NOT_FOUND", message: "no room" } },
+  { t: "idle" },
+  { t: "bye", reason: "done" },
+];
+
+function plain(frame: AnyFrame, deviceId = "phone"): Buffer {
+  return Buffer.from(sealFrame(frame, { direction: Direction.Up, deviceId }));
+}
+
+describe("peekHeader", () => {
+  it("reads the header of a sealed frame", () => {
+    assert.deepEqual(peekHeader(seal(PING)), {
+      sealed: true,
+      direction: Direction.Up,
+      deviceId: "phone",
+      salt: new Uint8Array(SALT),
+    });
+  });
+
+  it("reads the header of a plain frame, which has no salt", () => {
+    assert.deepEqual(peekHeader(plain(PING, "폰")), {
+      sealed: false,
+      direction: Direction.Up,
+      deviceId: "폰",
+      salt: new Uint8Array(0),
+    });
+  });
+
+  it("needs only the bytes up to the end of the salt", () => {
+    assert.equal(peekHeader(seal(PING).subarray(0, 3 + 5 + 16))?.deviceId, "phone");
+  });
+
+  it("returns undefined for a header that is cut short", () => {
+    const bytes = seal(PING);
+
+    for (let length = 0; length < 3 + 5 + 16; length++) {
+      assert.equal(peekHeader(bytes.subarray(0, length)), undefined, `length ${length}`);
+    }
+  });
+
+  it("returns undefined for an unknown version or direction", () => {
+    const badVersion = seal(PING);
+    badVersion[0] = 0x02;
+    const badDirection = seal(PING);
+    badDirection[1] = 0x02;
+
+    assert.equal(peekHeader(badVersion), undefined);
+    assert.equal(peekHeader(badDirection), undefined);
+  });
+
+  it("returns undefined for a device id that is not UTF-8", () => {
+    const bytes = Buffer.from([0x00, Direction.Up, 0x01, 0xff, 0x7b, 0x7d]);
+
+    assert.equal(peekHeader(bytes), undefined);
+  });
+
+  it("returns a copy of the salt, not a view of the bytes", () => {
+    const bytes = seal(PING);
+    const header = peekHeader(bytes)!;
+    header.salt[0] = 0xff;
+
+    assert.equal(bytes[8], 0x00);
+  });
+});
+
+describe("openFrame, sealed", () => {
+  it("opens what sealFrame made, for every kind of frame", () => {
+    for (const frame of FRAMES) {
+      const opened = openFrame(seal(frame), KEY);
+
+      assert.deepEqual(opened?.frame, frame);
+    }
+  });
+
+  it("returns the header and the counter along with the frame", () => {
+    const opened = openFrame(seal(PING, { deviceId: "폰", counter: 0x0102030405060708n }), KEY);
+
+    assert.deepEqual(opened, {
+      sealed: true,
+      direction: Direction.Up,
+      deviceId: "폰",
+      salt: new Uint8Array(SALT),
+      counter: 0x0102030405060708n,
+      frame: PING,
+    });
+  });
+
+  it("opens the known frame", () => {
+    const bytes = Buffer.from(
+      "01000570686f6e65000102030405060708090a0b0c0d0e0f000000000000000001" +
+        "752b7f1caedcf31a2f4f1aae488869263ec1cc083be379d0386b0b",
+      "hex",
+    );
+    const opened = openFrame(bytes, KEY);
+
+    assert.deepEqual(opened?.frame, PING);
+    assert.equal(opened?.counter, 0n);
+    assert.equal(opened?.deviceId, "phone");
+  });
+
+  it("opens bytes that are a view into a larger buffer", () => {
+    const bytes = seal(PING);
+    const larger = Buffer.alloc(bytes.length + 10);
+    bytes.copy(larger, 5);
+
+    assert.deepEqual(openFrame(larger.subarray(5, 5 + bytes.length), KEY)?.frame, PING);
+  });
+
+  it("refuses another key, including the key of the other direction", () => {
+    assert.equal(openFrame(seal(PING), deriveKey("other", SALT, Direction.Up)), undefined);
+    assert.equal(openFrame(seal(PING), deriveKey("test-token", SALT, Direction.Down)), undefined);
+  });
+
+  it("refuses a frame in which any single bit was changed", () => {
+    const bytes = seal(PING);
+
+    for (let index = 0; index < bytes.length; index++) {
+      const changed = Buffer.from(bytes);
+      changed[index] = changed[index]! ^ 0x01;
+
+      assert.equal(openFrame(changed, KEY), undefined, `byte ${index}`);
+    }
+  });
+
+  it("refuses a frame that is cut short or has bytes added", () => {
+    const bytes = seal(PING);
+
+    for (let length = 0; length < bytes.length; length++) {
+      assert.equal(openFrame(bytes.subarray(0, length), KEY), undefined, `length ${length}`);
+    }
+    assert.equal(openFrame(Buffer.concat([bytes, Buffer.from([0])]), KEY), undefined);
+  });
+
+  it("refuses sealed JSON that is not a frame", () => {
+    const notFrames = [42, null, "ping", [], {}, { t: 1 }, { t: "nope" }, { t: "constructor" }];
+
+    for (const value of notFrames) {
+      assert.equal(openFrame(seal(value as unknown as AnyFrame), KEY), undefined);
+    }
+  });
+
+  it("refuses a sealed frame when there is no key", () => {
+    assert.equal(openFrame(seal(PING)), undefined);
+  });
+
+  it("throws when the key is not 32 bytes", () => {
+    assert.throws(() => openFrame(seal(PING), KEY.subarray(0, 16)), RangeError);
+  });
+});
+
+describe("openFrame, plain", () => {
+  it("opens what sealFrame made without a key, for every kind of frame", () => {
+    for (const frame of FRAMES) {
+      assert.deepEqual(openFrame(plain(frame))?.frame, frame);
+    }
+  });
+
+  it("returns the header, with no salt and counter 0", () => {
+    assert.deepEqual(openFrame(plain(PING, "폰")), {
+      sealed: false,
+      direction: Direction.Up,
+      deviceId: "폰",
+      salt: new Uint8Array(0),
+      counter: 0n,
+      frame: PING,
+    });
+  });
+
+  it("refuses a plain frame when a key is given, so it cannot replace a sealed one", () => {
+    assert.equal(openFrame(plain(PING), KEY), undefined);
+  });
+
+  it("refuses a body that is not valid JSON, not UTF-8 or not a frame", () => {
+    const head = plain(PING).subarray(0, 8);
+
+    assert.equal(openFrame(Buffer.concat([head, Buffer.from("{not json")])), undefined);
+    assert.equal(openFrame(Buffer.concat([head, Buffer.from([0xff, 0xfe])])), undefined);
+    assert.equal(openFrame(Buffer.concat([head, Buffer.from('{"t":"nope"}')])), undefined);
   });
 });
