@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { decodeRef, encodeRef } from "../src/convert.ts";
+import { decodeRef, encodeRef, prepareContent, wireBlobToBlob } from "../src/convert.ts";
 import type { RoomLocation } from "../src/convert.ts";
+import type { WireBlob } from "../src/protocol.ts";
+import type { Sendable } from "../src/types.ts";
 
 const LOCATION: RoomLocation = {
   device: "phone",
@@ -96,5 +98,116 @@ describe("decodeRef", () => {
     );
     assert.notEqual(standard, ref);
     assert.equal(decodeRef(standard), undefined);
+  });
+});
+
+const BYTES = new Uint8Array([0, 1, 2, 250, 251, 255]);
+const BASE64 = Buffer.from(BYTES).toString("base64");
+
+async function bytesOf(blob: Blob | undefined): Promise<number[]> {
+  return Array.from(new Uint8Array(await blob!.arrayBuffer()));
+}
+
+describe("wireBlobToBlob", () => {
+  it("turns base64 data and its type into a Blob", async () => {
+    const blob = wireBlobToBlob({ mime: "image/png", base64: BASE64 });
+
+    assert.equal(blob?.type, "image/png");
+    assert.deepEqual(await bytesOf(blob), Array.from(BYTES));
+  });
+
+  it("returns undefined when there is no data", () => {
+    assert.equal(wireBlobToBlob(undefined), undefined);
+  });
+});
+
+describe("prepareContent, text", () => {
+  it("accepts a string and an object with text", async () => {
+    const expected = { content: { text: "안녕" }, required: ["room.send"] };
+
+    assert.deepEqual(await prepareContent("안녕"), expected);
+    assert.deepEqual(await prepareContent({ text: "안녕" }), expected);
+  });
+
+  it("refuses empty text", async () => {
+    await assert.rejects(prepareContent(""), TypeError);
+    await assert.rejects(prepareContent({ text: "" }), TypeError);
+    await assert.rejects(prepareContent({ text: 1 } as unknown as Sendable), TypeError);
+  });
+});
+
+describe("prepareContent, image", () => {
+  it("encodes bytes, which have no type", async () => {
+    const prepared = await prepareContent({ image: BYTES });
+
+    assert.deepEqual(prepared, {
+      content: { image: { mime: "application/octet-stream", base64: BASE64 } },
+      required: ["room.send", "send.image"],
+    });
+    assert.equal("caption" in prepared.content, false);
+  });
+
+  it("keeps the caption", async () => {
+    const prepared = await prepareContent({ image: BYTES, caption: "look" });
+
+    assert.equal("caption" in prepared.content && prepared.content.caption, "look");
+  });
+
+  it("takes the type of a Blob, or falls back when it has none", async () => {
+    const typed = await prepareContent({ image: new Blob([BYTES], { type: "image/jpeg" }) });
+    const untyped = await prepareContent({ image: new Blob([BYTES]) });
+
+    assert.deepEqual("image" in typed.content && typed.content.image, {
+      mime: "image/jpeg",
+      base64: BASE64,
+    });
+    assert.equal(
+      "image" in untyped.content && untyped.content.image.mime,
+      "application/octet-stream",
+    );
+  });
+
+  it("encodes only the bytes that a view covers", async () => {
+    const larger = new Uint8Array([9, 9, ...BYTES, 9]);
+    const prepared = await prepareContent({ image: larger.subarray(2, 2 + BYTES.length) });
+
+    assert.equal("image" in prepared.content && prepared.content.image.base64, BASE64);
+  });
+
+  it("can be turned back into the same bytes", async () => {
+    const prepared = await prepareContent({ image: new Blob([BYTES], { type: "image/png" }) });
+    const wire = "image" in prepared.content ? (prepared.content.image as WireBlob) : undefined;
+    const blob = wireBlobToBlob(wire);
+
+    assert.equal(blob?.type, "image/png");
+    assert.deepEqual(await bytesOf(blob), Array.from(BYTES));
+  });
+});
+
+describe("prepareContent, file", () => {
+  it("encodes the data and keeps the name", async () => {
+    assert.deepEqual(await prepareContent({ file: BYTES, name: "a.bin" }), {
+      content: { file: { mime: "application/octet-stream", base64: BASE64 }, name: "a.bin" },
+      required: ["room.send", "send.file"],
+    });
+  });
+
+  it("refuses a file without a name", async () => {
+    await assert.rejects(prepareContent({ file: BYTES, name: "" }), TypeError);
+    await assert.rejects(prepareContent({ file: BYTES } as unknown as Sendable), TypeError);
+  });
+});
+
+describe("prepareContent, invalid content", () => {
+  it("refuses what is not text, an image or a file", async () => {
+    for (const value of [{}, 42, null, undefined, true, []]) {
+      await assert.rejects(prepareContent(value as unknown as Sendable), TypeError);
+    }
+  });
+
+  it("refuses an object that has more than one of text, image and file", async () => {
+    const both = { text: "a", image: BYTES } as unknown as Sendable;
+
+    await assert.rejects(prepareContent(both), TypeError);
   });
 });
