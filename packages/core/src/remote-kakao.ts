@@ -36,6 +36,7 @@ import type {
   Link,
   Listener,
   ListenerOptions,
+  Plugin,
   RemoteKakaoOptions,
   Room,
   Transport,
@@ -86,6 +87,11 @@ export class RemoteKakao implements AsyncDisposable {
   readonly #readers = new Set<Promise<void>>();
   #listening = false;
   #closing: Promise<void> | undefined;
+  readonly #plugins: Plugin[] = [];
+  /** The plugins whose setup has started and not been undone. */
+  readonly #started = new Set<Plugin>();
+  /** What the plugins returned from `setup`, in the order they finished. */
+  readonly #cleanups: Array<() => void | Promise<void>> = [];
 
   /** Throws if the options are invalid. */
   constructor(options: RemoteKakaoOptions) {
@@ -140,6 +146,7 @@ export class RemoteKakao implements AsyncDisposable {
 
     const opened: TransportHandle[] = [];
     try {
+      for (const plugin of this.#plugins) await this.#runPlugin(plugin);
       for (const transport of this.#options.transports) {
         const handle = await transport.listen((link) => this.#accept(transport, link));
         opened.push(handle);
@@ -147,11 +154,34 @@ export class RemoteKakao implements AsyncDisposable {
       }
     } catch (error) {
       await Promise.allSettled(opened.map((handle) => handle.close()));
+      await this.#cleanUpPlugins();
       this.#listening = false;
       throw error;
     }
     this.#handles.push(...opened);
     options?.signal?.addEventListener("abort", () => void this.close(), { once: true });
+  }
+
+  /**
+   * Adds a plugin, whose `setup` runs when `listen` starts, or now if it already did.
+   * A plugin that was added before is ignored.
+   * If `setup` fails, `listen` rejects with the error when the plugin was added before `listen`.
+   * When it was added after `listen`, there is no call to reject, so the error is reported as an `error` event.
+   * Throws a `TypeError` if `plugin` has no `name` and `setup`, and `CLOSED` after `close`.
+   */
+  use(plugin: Plugin): this {
+    if (typeof plugin?.name !== "string" || typeof plugin.setup !== "function") {
+      throw new TypeError("a plugin needs a `name` and a `setup` function");
+    }
+    if (this.#closing !== undefined) throw new RKError("CLOSED", "RemoteKakao is closed");
+    if (this.#plugins.includes(plugin)) return this;
+    this.#plugins.push(plugin);
+    if (this.#listening) {
+      this.#runPlugin(plugin).catch((error: unknown) =>
+        this.#reportError({ error, source: "plugin", event: undefined, device: undefined }),
+      );
+    }
+    return this;
   }
 
   /**
@@ -191,7 +221,34 @@ export class RemoteKakao implements AsyncDisposable {
     const closed = new RKError("CLOSED", "RemoteKakao is closed");
     for (const device of this.#devices.values()) device.rejectAll(closed);
     await within(timeout, this.#emitter.settle());
+    await this.#cleanUpPlugins();
     this.#emitter.close();
+  }
+
+  /** Runs the `setup` of the plugin, unless it already started. */
+  async #runPlugin(plugin: Plugin): Promise<void> {
+    if (this.#started.has(plugin)) return;
+    this.#started.add(plugin);
+    const cleanup = await plugin.setup(this);
+    if (typeof cleanup !== "function") return;
+    if (this.#closing === undefined) this.#cleanups.push(cleanup);
+    else await this.#runCleanup(cleanup);
+  }
+
+  /** Undoes the setup of every plugin, the last one first. The plugins can be set up again after. */
+  async #cleanUpPlugins(): Promise<void> {
+    const cleanups = this.#cleanups.splice(0).reverse();
+    this.#started.clear();
+    for (const cleanup of cleanups) await this.#runCleanup(cleanup);
+  }
+
+  /** A cleanup that fails is reported, and does not keep the others from running. */
+  async #runCleanup(cleanup: () => void | Promise<void>): Promise<void> {
+    try {
+      await cleanup();
+    } catch (error) {
+      this.#reportError({ error, source: "plugin", event: undefined, device: undefined });
+    }
   }
 
   /** Calls `listener` every time the event happens. */
