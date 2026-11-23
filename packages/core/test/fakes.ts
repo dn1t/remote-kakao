@@ -211,6 +211,28 @@ export function fakeClient(
         ...overrides,
       } as AnyFrame);
     },
+    /** An event frame carrying a message, as the device sends it. */
+    messageEvent(
+      id: string,
+      overrides: { message?: Record<string, unknown>; frame?: Record<string, unknown> } = {},
+    ): Uint8Array {
+      return this.seal({
+        t: "event",
+        id,
+        name: "message",
+        appInstance: "kakao",
+        data: {
+          id: `m-${id}`,
+          room: { id: "r1", name: "Team" },
+          sender: { id: "u2", name: "Bob" },
+          type: "text",
+          text: "hello",
+          time: 1_700_000_000_000,
+          ...overrides.message,
+        },
+        ...overrides.frame,
+      } as AnyFrame);
+    },
     /** The frames Node wrote, as the device reads them. */
     received(link: { written: Uint8Array[] }): Array<OpenedFrame | undefined> {
       return link.written.map((bytes) => openFrame(bytes, down));

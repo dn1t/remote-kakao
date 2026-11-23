@@ -8,6 +8,7 @@ import type {
   Device,
   DeviceDisconnect,
   ErrorReport,
+  Message,
   RemoteKakaoOptions,
   Transport,
 } from "../src/types.ts";
@@ -197,6 +198,7 @@ describe("RemoteKakao", () => {
     });
 
     it("uses the requestTimeout option as the default deadline", async () => {
+      mock.timers.enable({ apis: ["Date"], now: 0 });
       const { room, sent, device } = roomWithSession(create({ requestTimeout: 5000 }));
 
       void room.markRead().catch(() => {});
@@ -807,6 +809,369 @@ describe("hello", () => {
 
       assert.equal(disconnected.length, 1);
       assert.equal(kakao.devices.get("phone")?.status, "online");
+    });
+  });
+});
+
+/** A core with one device that has said hello. */
+async function connected(options: Partial<RemoteKakaoOptions> = {}) {
+  const started = await start(options);
+  const client = fakeClient();
+  const link = started.connect();
+  link.push(client.hello({ caps: ["room.markRead"] }));
+  await flush();
+  const received = () => client.received(link).map((opened) => opened?.frame);
+  /** The acks Node sent, as lists of event ids. */
+  const acked = () =>
+    received().flatMap((frame) => (frame?.t === "ack" ? [(frame as { ids: string[] }).ids] : []));
+  const device = started.kakao.devices.get("phone") as DeviceState;
+  return { ...started, client, link, device, received, acked };
+}
+
+describe("frames of a session", () => {
+  describe("message events", () => {
+    it("emits the message, and acks the event", async () => {
+      const { kakao, link, client, acked } = await connected();
+      const messages: Message[] = [];
+      kakao.on("message", (message) => void messages.push(message));
+
+      link.push(client.messageEvent("e1"));
+      await flush();
+
+      assert.equal(messages.length, 1);
+      const [message] = messages;
+      assert.deepEqual(
+        [message?.id, message?.text, message?.type, message?.replayed],
+        ["m-e1", "hello", "text", false],
+      );
+      assert.deepEqual(
+        [message?.room.id, message?.room.name, message?.room.appInstance.id, message?.sender.id],
+        ["r1", "Team", "kakao", "u2"],
+      );
+      assert.equal(message?.room.device, kakao.devices.get("phone"));
+      assert.deepEqual(acked(), [["e1"]]);
+    });
+
+    it("tells that a message was replayed from the outbox of the device", async () => {
+      const { kakao, link, client } = await connected();
+      const messages: Message[] = [];
+      kakao.on("message", (message) => void messages.push(message));
+
+      link.push(client.messageEvent("e1", { frame: { replay: true } }));
+      await flush();
+
+      assert.equal(messages[0]?.replayed, true);
+    });
+
+    it("emits events in the order they arrive", async () => {
+      const { kakao, link, client } = await connected();
+      const ids: string[] = [];
+      kakao.on("message", (message) => void ids.push(message.id));
+
+      for (const id of ["e1", "e2", "e3"]) link.push(client.messageEvent(id));
+      await flush();
+
+      assert.deepEqual(ids, ["m-e1", "m-e2", "m-e3"]);
+    });
+
+    it("emits an event once, and acks it every time the device sends it", async () => {
+      const { kakao, link, client, received } = await connected();
+      const ids: string[] = [];
+      kakao.on("message", (message) => void ids.push(message.id));
+
+      link.push(client.messageEvent("e1"));
+      link.push(client.messageEvent("e1"));
+      await flush();
+
+      assert.deepEqual(ids, ["m-e1"]);
+      assert.deepEqual(
+        received().filter((frame) => frame?.t === "ack"),
+        [
+          { t: "ack", ids: ["e1"] },
+          { t: "ack", ids: ["e1"] },
+        ],
+      );
+    });
+
+    it("does not emit again an event of an earlier session of the device", async () => {
+      const { kakao, connect, link, client } = await connected();
+      const ids: string[] = [];
+      kakao.on("message", (message) => void ids.push(message.id));
+      link.push(client.messageEvent("e1"));
+      await flush();
+      const again = fakeClient({ salt: Buffer.alloc(16, 9) });
+      const secondLink = connect();
+      secondLink.push(again.hello());
+      await flush();
+
+      secondLink.push(again.messageEvent("e1"));
+      await flush();
+
+      assert.deepEqual(ids, ["m-e1"]);
+    });
+
+    const invalid: Array<[string, Record<string, unknown>]> = [
+      ["has no appInstance", { frame: { appInstance: undefined } }],
+      ["has a text that is a number", { message: { text: 5 } }],
+      ["has no room", { message: { room: undefined } }],
+      ["has a time that is not a date", { message: { time: "yesterday" } }],
+    ];
+    for (const [title, overrides] of invalid) {
+      it(`reports a message that ${title}, and acks it, without emitting it`, async () => {
+        const { kakao, link, client, errors, acked } = await connected();
+        const messages: Message[] = [];
+        kakao.on("message", (message) => void messages.push(message));
+
+        link.push(client.messageEvent("e1", overrides));
+        await flush();
+
+        assert.deepEqual(messages, []);
+        assert.equal(errors.length, 1);
+        assert.equal(errors[0]?.source, "device");
+        assert.ok(isRKError(errors[0]?.error, "PROTOCOL_ERROR"));
+        assert.match((errors[0]!.error as Error).message, /^device sent an invalid message: /);
+        assert.deepEqual(acked(), [["e1"]]);
+      });
+    }
+
+    it("keeps the session when a message is invalid", async () => {
+      const { device, link, client } = await connected();
+
+      link.push(client.messageEvent("e1", { message: { id: undefined } }));
+      await flush();
+
+      assert.equal(device.status, "online");
+      assert.deepEqual(link.closed, []);
+    });
+
+    it("reports a listener that throws, and still acks", async () => {
+      const { kakao, link, client, errors, acked } = await connected();
+      const failure = new Error("listener failed");
+      kakao.on("message", () => {
+        throw failure;
+      });
+
+      link.push(client.messageEvent("e1"));
+      await flush();
+
+      assert.deepEqual(
+        errors.map((report) => [report.source, report.event, report.error]),
+        [["listener", "message", failure]],
+      );
+      assert.deepEqual(acked(), [["e1"]]);
+    });
+  });
+
+  describe("idle", () => {
+    const idles = (frames: Array<{ t: string } | undefined>) =>
+      frames.filter((frame) => frame?.t === "idle").length;
+
+    it("waits until the listeners of an event have finished before telling the client", async () => {
+      const { kakao, link, client, received } = await connected();
+      let finish!: () => void;
+      kakao.on("message", () => new Promise<void>((resolve) => (finish = resolve)));
+      assert.equal(idles(received()), 1);
+
+      link.push(client.messageEvent("e1"));
+      await flush();
+      assert.equal(idles(received()), 1);
+      finish();
+      await flush();
+
+      assert.equal(idles(received()), 2);
+    });
+
+    it("does not tell the client while a listener runs, even if a request of the device is answered", async () => {
+      const { kakao, link, client, received } = await connected();
+      let finish!: () => void;
+      kakao.on("message", () => new Promise<void>((resolve) => (finish = resolve)));
+      link.push(client.messageEvent("e1"));
+      await flush();
+
+      const call = kakao.room(REF_OF_PHONE).markRead();
+      await flush();
+      const request = received().find((frame) => frame?.t === "req") as { id: string };
+      link.push(client.seal({ t: "res", id: request.id, ok: true, result: {} }));
+      await call;
+      await flush();
+      assert.equal(idles(received()), 1);
+      finish();
+      await flush();
+
+      assert.equal(idles(received()), 2);
+    });
+
+    it("tells the client again after each event once it is handled", async () => {
+      const { kakao, link, client, received } = await connected();
+      kakao.on("message", () => {});
+
+      link.push(client.messageEvent("e1"));
+      await flush();
+      link.push(client.messageEvent("e2"));
+      await flush();
+
+      assert.equal(idles(received()), 3);
+    });
+  });
+
+  describe("events of extensions", () => {
+    it("emits the event with its device, app instance and data", async () => {
+      const { kakao, link, client, device, acked } = await connected();
+      const events: unknown[] = [];
+      kakao.on("acme:ping" as never, (event: unknown) => void events.push(event));
+
+      link.push(
+        client.seal({
+          t: "event",
+          id: "x1",
+          name: "acme:ping",
+          appInstance: "kakao",
+          data: { n: 1 },
+        }),
+      );
+      await flush();
+
+      assert.deepEqual(events, [
+        { device, appInstance: device.appInstance("kakao"), data: { n: 1 } },
+      ]);
+      assert.deepEqual(acked(), [["x1"]]);
+    });
+
+    it("has no app instance when the event names none", async () => {
+      const { kakao, link, client, device } = await connected();
+      const events: unknown[] = [];
+      kakao.on("acme:ping" as never, (event: unknown) => void events.push(event));
+
+      link.push(client.seal({ t: "event", id: "x1", name: "acme:ping", data: 5 }));
+      await flush();
+
+      assert.deepEqual(events, [{ device, appInstance: undefined, data: 5 }]);
+    });
+
+    it("acks an event with a name it does not know, without emitting it", async () => {
+      const { kakao, link, client, errors, acked } = await connected();
+      const emitted: unknown[] = [];
+      kakao.on("unknown" as never, (event: unknown) => void emitted.push(event));
+
+      link.push(client.seal({ t: "event", id: "x1", name: "unknown", data: 1 } as never));
+      await flush();
+
+      assert.deepEqual(emitted, []);
+      assert.deepEqual(errors, []);
+      assert.deepEqual(acked(), [["x1"]]);
+    });
+
+    it("ignores an event that has no id, without acking", async () => {
+      const { link, client, received } = await connected();
+      const before = received().length;
+
+      link.push(client.seal({ t: "event", name: "message", data: {} } as never));
+      await flush();
+
+      assert.equal(received().length, before);
+    });
+  });
+
+  describe("responses and requests", () => {
+    it("settles the request that a res answers", async () => {
+      const { kakao, link, client, received } = await connected();
+      const call = kakao.room(REF_OF_PHONE).markRead();
+      await flush();
+      const request = received().find((frame) => frame?.t === "req") as { id: string };
+
+      link.push(client.seal({ t: "res", id: request.id, ok: true, result: {} }));
+      await flush();
+
+      assert.equal(await call, undefined);
+    });
+
+    it("rejects the request with the code of an error res", async () => {
+      const { kakao, link, client, received } = await connected();
+      const call = kakao.room(REF_OF_PHONE).markRead();
+      const rejected = assert.rejects(call, (error) => isRKError(error, "NOT_FOUND"));
+      await flush();
+      const request = received().find((frame) => frame?.t === "req") as { id: string };
+
+      link.push(
+        client.seal({
+          t: "res",
+          id: request.id,
+          ok: false,
+          error: { code: "NOT_FOUND", message: "no such room" },
+        }),
+      );
+
+      await rejected;
+    });
+
+    it("answers a request of the device with UNSUPPORTED", async () => {
+      const { link, client, received } = await connected();
+
+      link.push(client.seal({ t: "req", id: "d1", method: "acme:do", params: null, ttl: 1000 }));
+      await flush();
+
+      assert.deepEqual(received().at(-1), {
+        t: "res",
+        id: "d1",
+        ok: false,
+        error: { code: "UNSUPPORTED", message: "Node has no method that devices can call" },
+      });
+    });
+  });
+
+  describe("ping and bye", () => {
+    it("answers a ping with a pong", async () => {
+      const { link, client, received } = await connected();
+
+      link.push(client.seal({ t: "ping" }));
+      await flush();
+
+      assert.deepEqual(received().at(-1), { t: "pong" });
+    });
+
+    it("resolves the ping of device.ping() when the pong comes", async () => {
+      const { kakao, link, client, received } = await connected();
+
+      const ping = kakao.devices.get("phone")!.ping();
+      await flush();
+      assert.equal(received().at(-1)?.t, "ping");
+      link.push(client.seal({ t: "pong" }));
+
+      assert.equal(typeof (await ping), "number");
+    });
+
+    it("ends the session and closes the link on bye, without an error", async () => {
+      const { kakao, link, client, disconnected, device } = await connected();
+
+      link.push(client.seal({ t: "bye" }));
+      await flush();
+
+      assert.deepEqual(disconnected, [{ device, error: undefined }]);
+      assert.deepEqual(link.closed, ["bye"]);
+      assert.equal(kakao.devices.get("phone")?.status, "offline");
+    });
+
+    it("does not read frames that come after bye", async () => {
+      const { kakao, link, client } = await connected();
+      const ids: string[] = [];
+      kakao.on("message", (message) => void ids.push(message.id));
+
+      link.push(client.seal({ t: "bye" }));
+      link.push(client.messageEvent("e1"));
+      await flush();
+
+      assert.deepEqual(ids, []);
+    });
+
+    it("ignores a frame sent again", async () => {
+      const { link, client, received } = await connected();
+      const ping = client.seal({ t: "ping" });
+
+      link.push(ping);
+      link.push(ping);
+      await flush();
+
+      assert.equal(received().filter((frame) => frame?.t === "pong").length, 1);
     });
   });
 });

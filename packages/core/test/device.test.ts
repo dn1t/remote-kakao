@@ -287,6 +287,7 @@ describe("DeviceState", () => {
 
   describe("request", () => {
     it("writes the request to the open session and resolves with the result", async () => {
+      mock.timers.enable({ apis: ["Date"], now: 0 });
       const { device } = newDevice();
       const { session, sent } = plainSession();
       device.attachSession(session);
