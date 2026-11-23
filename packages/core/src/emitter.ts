@@ -2,6 +2,7 @@ import { RKError } from "./errors.ts";
 import type {
   EventName,
   EventPayload,
+  IterateOptions,
   Listener,
   ListenerOptions,
   Unsubscribe,
@@ -16,6 +17,8 @@ interface Entry {
 export interface EmitterHooks {
   /** A listener threw or rejected. */
   onListenerError(error: unknown, event: EventName): void;
+  /** An iteration dropped its oldest payloads because it was not read fast enough. */
+  onDrop(event: EventName, dropped: number): void;
 }
 
 /**
@@ -144,6 +147,99 @@ export class Emitter {
     });
   }
 
+  /**
+   * Iterates over the payloads of the event that pass `filter`, as they are emitted.
+   * Payloads that come while the loop is busy are kept up to `buffer`, and the oldest are
+   * dropped past that. The iteration ends when the loop stops, when `signal` is aborted, and when
+   * the emitter is closed. If `filter` throws, the iteration throws that error after the payloads
+   * that were kept.
+   */
+  iterate<E extends EventName>(
+    event: E,
+    options?: IterateOptions<EventPayload<E>>,
+  ): AsyncIterableIterator<EventPayload<E>> {
+    const { filter, signal, buffer = 1000 } = options ?? {};
+    if (!Number.isInteger(buffer) || buffer < 1) {
+      throw new RangeError("buffer must be a positive integer");
+    }
+
+    const kept: EventPayload<E>[] = [];
+    let reader: Reader<IteratorResult<EventPayload<E>>> | undefined;
+    let ended = false;
+    let failure: { error: unknown } | undefined;
+
+    const takeReader = () => {
+      const current = reader;
+      reader = undefined;
+      return current;
+    };
+    const stop = () => {
+      ended = true;
+      off();
+      this.#closers.delete(finish);
+      signal?.removeEventListener("abort", finish);
+    };
+    const finish = () => {
+      if (ended) return;
+      stop();
+      takeReader()?.resolve({ value: undefined, done: true });
+    };
+    const fail = (error: unknown) => {
+      if (ended) return;
+      stop();
+      failure = { error };
+      takeReader()?.reject(error);
+    };
+
+    const off = this.on(event, (payload) => {
+      try {
+        if (filter && !filter(payload)) return;
+      } catch (error) {
+        fail(error);
+        return;
+      }
+      const waiting = takeReader();
+      if (waiting) {
+        waiting.resolve({ value: payload, done: false });
+        return;
+      }
+      kept.push(payload);
+      if (kept.length > buffer) {
+        const dropped = kept.length - buffer;
+        kept.splice(0, dropped);
+        this.#hooks.onDrop(event, dropped);
+      }
+    });
+    this.#closers.add(finish);
+
+    if (this.#closed || signal?.aborted) finish();
+    else signal?.addEventListener("abort", finish, { once: true });
+
+    const iterator: AsyncIterableIterator<EventPayload<E>> = {
+      next: () => {
+        if (kept.length > 0) return Promise.resolve({ value: kept.shift()!, done: false });
+        if (failure) {
+          const { error } = failure;
+          failure = undefined;
+          return Promise.reject(error);
+        }
+        if (ended) return Promise.resolve({ value: undefined, done: true });
+        if (reader) return Promise.reject(new Error("an event is already being read"));
+        return new Promise((resolve, reject) => {
+          reader = { resolve, reject };
+        });
+      },
+      // Called when the loop stops early, e.g. with `break`.
+      return: () => {
+        finish();
+        kept.length = 0;
+        return Promise.resolve({ value: undefined, done: true });
+      },
+      [Symbol.asyncIterator]: () => iterator,
+    };
+    return iterator;
+  }
+
   /** Waits until every async listener started so far has settled. */
   async settle(): Promise<void> {
     while (this.#running.size > 0) await Promise.all(this.#running);
@@ -193,6 +289,11 @@ export class Emitter {
       // A failing hook has nobody left to tell, and must not reach the process.
     }
   }
+}
+
+interface Reader<T> {
+  resolve(result: T): void;
+  reject(error: unknown): void;
 }
 
 function closedError(): RKError {
