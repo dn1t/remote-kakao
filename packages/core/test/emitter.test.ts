@@ -15,11 +15,15 @@ const report = (label: string): Report => ({
   device: undefined,
 });
 
-/** An emitter that records the errors of its listeners. */
+/** An emitter that records the errors of its listeners and the payloads it dropped. */
 function create() {
   const errors: { error: unknown; event: EventName }[] = [];
-  const emitter = new Emitter({ onListenerError: (error, event) => errors.push({ error, event }) });
-  return { emitter, errors };
+  const drops: { event: EventName; dropped: number }[] = [];
+  const emitter = new Emitter({
+    onListenerError: (error, event) => errors.push({ error, event }),
+    onDrop: (event, dropped) => drops.push({ event, dropped }),
+  });
+  return { emitter, errors, drops };
 }
 
 /** A promise that is settled by hand. */
@@ -295,6 +299,7 @@ describe("Emitter, failing listeners", () => {
         onListenerError: () => {
           throw new Error("hook");
         },
+        onDrop: () => {},
       });
       emitter.on("error", () => {
         throw new Error("sync");
@@ -584,5 +589,230 @@ describe("Emitter, close", () => {
     mock.timers.tick(1000);
 
     await outcome;
+  });
+});
+
+describe("Emitter, iterate", () => {
+  it("gives the payloads that are emitted while the loop waits", async () => {
+    const { emitter } = create();
+    const seen: unknown[] = [];
+    const loop = (async () => {
+      for await (const payload of emitter.iterate("error")) {
+        seen.push(payload.error);
+        if (seen.length === 3) break;
+      }
+    })();
+
+    for (const label of ["a", "b", "c"]) {
+      await tick();
+      await emitter.emit("error", report(label));
+    }
+    await loop;
+
+    assert.deepEqual(seen, ["a", "b", "c"]);
+  });
+
+  it("keeps the payloads that come while the loop is busy, in order", async () => {
+    const { emitter } = create();
+    const iterator = emitter.iterate("error");
+
+    await emitter.emit("error", report("a"));
+    await emitter.emit("error", report("b"));
+
+    assert.equal((await iterator.next()).value.error, "a");
+    assert.equal((await iterator.next()).value.error, "b");
+  });
+
+  it("gives only the payloads that pass the filter", async () => {
+    const { emitter } = create();
+    const iterator = emitter.iterate("error", { filter: (payload) => payload.error !== "skip" });
+
+    await emitter.emit("error", report("skip"));
+    await emitter.emit("error", report("keep"));
+    await emitter.emit("error", report("skip"));
+
+    assert.equal((await iterator.next()).value.error, "keep");
+    assert.equal(await isSettled(iterator.next()), false);
+  });
+
+  it("is its own async iterator", () => {
+    const { emitter } = create();
+    const iterator = emitter.iterate("error");
+
+    assert.equal(iterator[Symbol.asyncIterator](), iterator);
+  });
+
+  it("listens only while the iteration lasts", async () => {
+    const { emitter } = create();
+    const iterator = emitter.iterate("error");
+    assert.equal(emitter.has("error"), true);
+
+    await iterator.return?.();
+
+    assert.equal(emitter.has("error"), false);
+  });
+
+  describe("when the loop stops early", () => {
+    it("ends the iteration, stops listening and drops what was kept", async () => {
+      const { emitter } = create();
+      const iterator = emitter.iterate("error");
+      await emitter.emit("error", report("a"));
+      await emitter.emit("error", report("b"));
+
+      for await (const payload of iterator) {
+        assert.equal(payload.error, "a");
+        break;
+      }
+
+      assert.equal(emitter.has("error"), false);
+      assert.deepEqual(await iterator.next(), { value: undefined, done: true });
+    });
+  });
+
+  describe("buffer", () => {
+    it("drops the oldest payloads past the limit and tells the hook", async () => {
+      const { emitter, drops } = create();
+      const iterator = emitter.iterate("error", { buffer: 2 });
+
+      for (const label of ["1", "2", "3", "4", "5"]) await emitter.emit("error", report(label));
+
+      assert.deepEqual(drops, Array(3).fill({ event: "error", dropped: 1 }));
+      assert.equal((await iterator.next()).value.error, "4");
+      assert.equal((await iterator.next()).value.error, "5");
+    });
+
+    it("keeps 1000 payloads by default", async () => {
+      const { emitter, drops } = create();
+      const iterator = emitter.iterate("error");
+
+      for (let index = 0; index < 1005; index++) await emitter.emit("error", report(`${index}`));
+
+      assert.equal(drops.length, 5);
+      assert.equal((await iterator.next()).value.error, "5");
+    });
+
+    it("does not drop a payload that a waiting loop takes at once", async () => {
+      const { emitter, drops } = create();
+      const iterator = emitter.iterate("error", { buffer: 1 });
+      const next = iterator.next();
+
+      await emitter.emit("error", report("a"));
+
+      assert.equal((await next).value.error, "a");
+      assert.deepEqual(drops, []);
+    });
+
+    it("must be a positive integer", () => {
+      const { emitter } = create();
+
+      for (const buffer of [0, -1, 1.5, Number.NaN, Infinity]) {
+        assert.throws(() => emitter.iterate("error", { buffer }), RangeError);
+      }
+    });
+  });
+
+  describe("with a signal", () => {
+    it("ends the iteration when it is aborted", async () => {
+      const { emitter } = create();
+      const controller = new AbortController();
+      const iterator = emitter.iterate("error", { signal: controller.signal });
+      const next = iterator.next();
+
+      controller.abort();
+
+      assert.deepEqual(await next, { value: undefined, done: true });
+      assert.equal(emitter.has("error"), false);
+    });
+
+    it("ends at once for a signal that is already aborted", async () => {
+      const { emitter } = create();
+      const iterator = emitter.iterate("error", { signal: AbortSignal.abort() });
+
+      assert.equal(emitter.has("error"), false);
+      assert.deepEqual(await iterator.next(), { value: undefined, done: true });
+    });
+
+    it("does not leave its listener on the signal once it has ended", async () => {
+      const { emitter } = create();
+      const controller = new AbortController();
+      const iterator = emitter.iterate("error", { signal: controller.signal });
+      assert.equal(getEventListeners(controller.signal, "abort").length, 1);
+
+      await iterator.return?.();
+
+      assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    });
+  });
+
+  describe("when the emitter is closed", () => {
+    it("ends the iterations, without an error", async () => {
+      const { emitter } = create();
+      const iterator = emitter.iterate("error");
+      const next = iterator.next();
+
+      emitter.close();
+
+      assert.deepEqual(await next, { value: undefined, done: true });
+    });
+
+    it("ends an iteration that starts afterwards", async () => {
+      const { emitter } = create();
+      emitter.close();
+      const iterator = emitter.iterate("error");
+
+      assert.deepEqual(await iterator.next(), { value: undefined, done: true });
+      assert.equal(emitter.has("error"), false);
+    });
+  });
+
+  describe("when the filter throws", () => {
+    it("throws the error after the payloads that were kept, and then ends", async () => {
+      const { emitter, errors } = create();
+      const failure = new Error("bad filter");
+      const iterator = emitter.iterate("error", {
+        filter: (payload) => {
+          if (payload.error === "bad") throw failure;
+          return true;
+        },
+      });
+
+      await emitter.emit("error", report("a"));
+      await emitter.emit("error", report("bad"));
+
+      assert.equal((await iterator.next()).value.error, "a");
+      await assert.rejects(iterator.next(), (error) => error === failure);
+      assert.deepEqual(await iterator.next(), { value: undefined, done: true });
+      assert.equal(emitter.has("error"), false);
+      assert.deepEqual(errors, []);
+    });
+
+    it("rejects the read that is waiting", async () => {
+      const { emitter } = create();
+      const failure = new Error("bad filter");
+      const iterator = emitter.iterate("error", {
+        filter: () => {
+          throw failure;
+        },
+      });
+      const next = iterator.next();
+
+      await emitter.emit("error", report("x"));
+
+      await assert.rejects(next, (error) => error === failure);
+    });
+  });
+
+  describe("a second read at the same time", () => {
+    it("is refused, and the first read still gets its payload", async () => {
+      const { emitter } = create();
+      const iterator = emitter.iterate("error");
+      const first = iterator.next();
+      const second = iterator.next();
+
+      await assert.rejects(second, /already being read/);
+      await emitter.emit("error", report("a"));
+
+      assert.equal((await first).value.error, "a");
+    });
   });
 });
