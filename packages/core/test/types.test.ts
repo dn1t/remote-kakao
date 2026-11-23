@@ -12,6 +12,8 @@ import type {
   Listener,
   Message,
   MessageData,
+  Plugin,
+  PluginCleanup,
   RemoteKakaoOptions,
   Room,
   RoomData,
@@ -205,5 +207,30 @@ describe("plain data", () => {
     const room: RoomData = { ref: "r", id: "1", appInstance: "a", device: "d", kind: "group" };
 
     assert.ok(room);
+  });
+});
+
+describe("Plugin", () => {
+  it("takes a name and a setup that returns nothing, a cleanup, or a promise of either", () => {
+    const plugins: Plugin[] = [
+      { name: "plain", setup() {} },
+      { name: "cleanup", setup: () => () => {} },
+      { name: "async", setup: async () => {} },
+      { name: "async cleanup", setup: async () => async () => {} },
+      { name: "subscribes", setup: (rk) => rk.on("message", () => {}) },
+    ];
+
+    assert.equal(plugins.length, 5);
+  });
+
+  it("is refused without a name or a setup, or with a cleanup that takes arguments", () => {
+    // @ts-expect-error a plugin needs a name
+    const noName: Plugin = { setup() {} };
+    // @ts-expect-error a plugin needs a setup
+    const noSetup: Plugin = { name: "x" };
+    // @ts-expect-error a cleanup is called without arguments
+    const badCleanup: PluginCleanup = (value: number) => value;
+
+    assert.ok(noName && noSetup && badCleanup);
   });
 });
