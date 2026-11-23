@@ -62,13 +62,10 @@ describe("checkHello", () => {
       });
     });
 
-    it("checks the version before anything else, as another version may have another shape", async () => {
-      const { context: ctx } = context();
-
-      const verdict = await checkHello({ t: "hello", v: 7 } as unknown as Hello, ctx);
+    it("checks the version before the shape, as another version may have another shape", async () => {
+      const verdict = await checkHello({ t: "hello", v: 7 } as unknown as Hello, context().context);
 
       assert.equal(verdict.accepted === false && verdict.code, "PROTOCOL_MISMATCH");
-      assert.equal(ctx.saltCache.size, 0);
     });
   });
 
@@ -131,14 +128,6 @@ describe("checkHello", () => {
         reject: { t: "reject", code: "AUTH_FAILED", message: "device id does not match the frame" },
       });
     });
-
-    it("does not remember the salt of such a hello", async () => {
-      const { context: ctx } = context({ device: "tablet" });
-
-      await checkHello(hello(), ctx);
-
-      assert.equal(ctx.saltCache.size, 0);
-    });
   });
 
   describe("clock", () => {
@@ -166,17 +155,33 @@ describe("checkHello", () => {
         });
       }
     });
-
-    it("does not remember the salt of a hello with a bad clock", async () => {
-      const { context: ctx } = context();
-
-      await checkHello(hello({ ts: 0 }), ctx);
-
-      assert.equal(ctx.saltCache.size, 0);
-    });
   });
 
   describe("salt", () => {
+    const refused: Array<[string, Hello, Partial<HelloContext>]> = [
+      ["version", hello({ v: 2 }), {}],
+      ["shape", hello({ caps: 1 }), {}],
+      ["device", hello(), { device: "tablet" }],
+      ["clock", hello({ ts: 0 }), {}],
+      ["verify", hello(), { verify: () => false }],
+    ];
+    for (const [check, badHello, overrides] of refused) {
+      it(`is used up by a hello that fails the ${check} check, so its answer is the only one sealed with those keys`, async () => {
+        const { context: ctx } = context(overrides);
+        const first = await checkHello(badHello, ctx);
+
+        const second = await checkHello(hello(), { ...ctx, device: "phone", verify: undefined });
+
+        assert.equal(first.accepted, false);
+        assert.deepEqual(second, {
+          accepted: false,
+          code: "AUTH_FAILED",
+          reason: "replayed session salt",
+          reject: undefined,
+        });
+      });
+    }
+
     it("refuses the same salt a second time, telling the device nothing", async () => {
       const { context: ctx } = context();
 
