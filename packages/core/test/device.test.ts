@@ -3,7 +3,7 @@ import { getEventListeners } from "node:events";
 import { afterEach, describe, it, mock } from "node:test";
 
 import type { SessionKeys } from "../src/device.ts";
-import { DeviceState, SessionState } from "../src/device.ts";
+import { DeviceState, MAX_SEEN_EVENTS, SessionState } from "../src/device.ts";
 import type { DeviceContext } from "../src/device.ts";
 import { isRKError, RKError } from "../src/errors.ts";
 import type { AnyFrame, RequestFrame } from "../src/protocol.ts";
@@ -785,6 +785,159 @@ describe("DeviceState", () => {
       await assert.rejects(sentOne, (e) => e === error);
       await assert.rejects(sentTwo, (e) => e === error);
       assert.equal(device.pendingCount, 0);
+    });
+  });
+
+  describe("chainRoomSend", () => {
+    /** A send that finishes when `finish` or `fail` is called. */
+    function manualSend(log: string[], name: string) {
+      let finish!: () => void;
+      let fail!: (error: Error) => void;
+      const promise = new Promise<string>((resolve, reject) => {
+        finish = () => resolve(name);
+        fail = reject;
+      });
+      return {
+        run: () => {
+          log.push(`start ${name}`);
+          return promise;
+        },
+        finish,
+        fail,
+      };
+    }
+
+    it("starts a send only after the earlier ones to the same room have finished", async () => {
+      const { device } = newDevice();
+      const log: string[] = [];
+      const a = manualSend(log, "a");
+      const b = manualSend(log, "b");
+      const c = manualSend(log, "c");
+
+      const results = [
+        device.chainRoomSend("app", "room", a.run),
+        device.chainRoomSend("app", "room", b.run),
+        device.chainRoomSend("app", "room", c.run),
+      ];
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(log, ["start a"]);
+      a.finish();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(log, ["start a", "start b"]);
+      b.finish();
+      c.finish();
+
+      assert.deepEqual(await Promise.all(results), ["a", "b", "c"]);
+      assert.deepEqual(log, ["start a", "start b", "start c"]);
+    });
+
+    it("still orders a send behind the ones in progress after an earlier send finished", async () => {
+      const { device } = newDevice();
+      const log: string[] = [];
+      const a = manualSend(log, "a");
+      const b = manualSend(log, "b");
+      const c = manualSend(log, "c");
+
+      const first = device.chainRoomSend("app", "room", a.run);
+      const second = device.chainRoomSend("app", "room", b.run);
+      a.finish();
+      await first;
+      await new Promise((resolve) => setImmediate(resolve));
+      const third = device.chainRoomSend("app", "room", c.run);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.deepEqual(log, ["start a", "start b"]);
+      b.finish();
+      c.finish();
+      await Promise.all([second, third]);
+      assert.deepEqual(log, ["start a", "start b", "start c"]);
+    });
+
+    it("runs the next send after one failed, and rejects only the failed one", async () => {
+      const { device } = newDevice();
+      const log: string[] = [];
+      const a = manualSend(log, "a");
+      const b = manualSend(log, "b");
+
+      const first = device.chainRoomSend("app", "room", a.run);
+      const second = device.chainRoomSend("app", "room", b.run);
+      a.fail(new Error("boom"));
+      b.finish();
+
+      await assert.rejects(first, { message: "boom" });
+      assert.equal(await second, "b");
+    });
+
+    it("runs the next send after one threw", async () => {
+      const { device } = newDevice();
+
+      const first = device.chainRoomSend("app", "room", () => {
+        throw new Error("sync");
+      });
+      const second = device.chainRoomSend("app", "room", async () => "ok");
+
+      await assert.rejects(first, { message: "sync" });
+      assert.equal(await second, "ok");
+    });
+
+    it("does not make sends to other rooms wait", async () => {
+      const { device } = newDevice();
+      const log: string[] = [];
+      const slow = manualSend(log, "slow");
+      const other = manualSend(log, "other");
+      const otherApp = manualSend(log, "otherApp");
+
+      const results = [
+        device.chainRoomSend("app", "room", slow.run),
+        device.chainRoomSend("app", "elsewhere", other.run),
+        device.chainRoomSend("other-app", "room", otherApp.run),
+      ];
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.deepEqual(log, ["start slow", "start other", "start otherApp"]);
+      slow.finish();
+      other.finish();
+      otherApp.finish();
+      await Promise.all(results);
+    });
+
+    it("tells rooms apart even when the ids contain the separator", async () => {
+      const { device } = newDevice();
+      const log: string[] = [];
+      const a = manualSend(log, "a");
+      const b = manualSend(log, "b");
+
+      const results = [
+        device.chainRoomSend("a:b", "c", a.run),
+        device.chainRoomSend("a", "b:c", b.run),
+      ];
+      await new Promise((resolve) => setImmediate(resolve));
+
+      assert.deepEqual(log, ["start a", "start b"]);
+      a.finish();
+      b.finish();
+      await Promise.all(results);
+    });
+  });
+
+  describe("acceptEvent", () => {
+    it("accepts an event id once", () => {
+      const { device } = newDevice();
+
+      assert.deepEqual(
+        ["a", "b", "a", "b", "c"].map((id) => device.acceptEvent(id)),
+        [true, true, false, false, true],
+      );
+    });
+
+    it("remembers the latest ids and forgets the oldest", () => {
+      const { device } = newDevice();
+      for (let i = 0; i < MAX_SEEN_EVENTS; i++) device.acceptEvent(`e${i}`);
+
+      assert.equal(device.acceptEvent("e1"), false);
+      assert.equal(device.acceptEvent("new"), true);
+      assert.equal(device.acceptEvent("e0"), true);
+      assert.equal(device.acceptEvent(`e${MAX_SEEN_EVENTS - 1}`), false);
     });
   });
 
