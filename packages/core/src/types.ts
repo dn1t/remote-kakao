@@ -10,6 +10,7 @@ import type {
   RoomType,
   UserId,
 } from "./protocol.ts";
+import type { RemoteKakao } from "./remote-kakao.ts";
 
 /** Where remote-kakao writes its logs. `console` satisfies. */
 export interface Logger {
@@ -21,7 +22,6 @@ export interface Logger {
 
 /** Options shared by every call that waits for a device to answer. */
 export interface RequestOptions {
-  // TODO: the `requestTimeout` option of `RemoteKakao` is not implemented yet
   /** Deadline in ms. Defaults to the `requestTimeout` option of `RemoteKakao`. */
   timeout?: number;
   /** Aborts the call, which then rejects with `ABORTED`. */
@@ -37,7 +37,6 @@ export interface ListenerOptions {
   signal?: AbortSignal;
 }
 
-// TODO: `wait` and `nextMessage` are not implemented yet
 /** Options for waiting until an event happens once, e.g. `wait` and `nextMessage`. */
 export interface WaitOptions<T> {
   /** The wait resolves with the first payload for which this returns `true`. Other payloads are skipped. */
@@ -48,7 +47,6 @@ export interface WaitOptions<T> {
   signal?: AbortSignal;
 }
 
-// TODO: `iterate` and `messages` are not implemented yet
 /** Options for looping over every payload of an event with `for await`, e.g. `iterate` and `messages`. */
 export interface IterateOptions<T> {
   /** Payloads for which this returns `false` are skipped. */
@@ -449,7 +447,6 @@ export type EventPayload<E extends EventName> = EventMap[E];
 /** Function that receives the payload of the event `E`. */
 export type Listener<E extends EventName> = (payload: EventPayload<E>) => unknown;
 
-// TODO: `RemoteKakao` is not implemented yet
 /** Options of `RemoteKakao`. */
 export interface RemoteKakaoOptions {
   /** Transports to listen on. Several can run at once. */
@@ -482,3 +479,21 @@ export interface AuthOptions {
    */
   verify?(hello: DeviceHello): boolean | Promise<boolean>;
 }
+
+/**
+ * A reusable piece of code that works through the public API of `RemoteKakao`,
+ * such as a logger, a command handler, or the server side of a client extension.
+ * Add it with `RemoteKakao.use`. Its `setup` subscribes to events and starts what it needs.
+ */
+export interface Plugin {
+  /** Names the plugin. */
+  readonly name: string;
+  /**
+   * Called once, when `listen` starts or, if it already did, when the plugin is added.
+   * A function it returns is called when `RemoteKakao` closes. A returned `on` unsubscribe fits.
+   */
+  setup(rk: RemoteKakao): PluginCleanup | Promise<PluginCleanup>;
+}
+
+/** What `Plugin.setup` returns to clean up after itself, if it has anything to clean. */
+export type PluginCleanup = void | (() => void | Promise<void>);
