@@ -5,7 +5,7 @@ import type { DeviceContext, SessionKeys } from "./device.ts";
 import { DeviceState, SessionState } from "./device.ts";
 import { Emitter } from "./emitter.ts";
 import type { MessageStream } from "./entities.ts";
-import { AppInstanceImpl, UserImpl } from "./entities.ts";
+import { AppInstanceImpl, MessageImpl, UserImpl } from "./entities.ts";
 import { createErrorReporter } from "./error-report.ts";
 import { RKError } from "./errors.ts";
 import { checkHello, SALT_TTL } from "./hello.ts";
@@ -13,7 +13,16 @@ import type { IncomingFrame, TokenLookup } from "./intake.ts";
 import { intake } from "./intake.ts";
 import type { ResolvedOptions } from "./options.ts";
 import { resolveOptions } from "./options.ts";
-import type { AppInstanceId, DeviceId, Hello, Reject, ServerFrame } from "./protocol.ts";
+import type {
+  AppInstanceId,
+  ClientFrame,
+  DeviceId,
+  EventFrame,
+  Hello,
+  Reject,
+  ServerFrame,
+  WireMessage,
+} from "./protocol.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
 import { SaltCache } from "./salt-cache.ts";
 import { Direction, sealFrame } from "./seal.ts";
@@ -22,6 +31,7 @@ import type {
   ErrorReport,
   EventName,
   EventPayload,
+  ExtensionEvent,
   IterateOptions,
   Link,
   Listener,
@@ -33,6 +43,7 @@ import type {
   Unsubscribe,
   WaitOptions,
 } from "./types.ts";
+import { wireMessageProblem } from "./wire-message.ts";
 
 /** What a link holds once its device has said hello. */
 interface Connection {
@@ -179,6 +190,7 @@ export class RemoteKakao {
     let failure: RKError | undefined;
     try {
       for await (const raw of link.frames) {
+        if (connection?.session.ended) break;
         const result = await intake(raw, this.#tokenOf, connection?.session);
         if (result.kind === "ignore") {
           logger.debug(`ignored a frame: ${result.reason}`);
@@ -205,6 +217,8 @@ export class RemoteKakao {
             result.keys,
           );
           if (connection === undefined) break;
+        } else {
+          this.#handleFrame(connection, link, frame);
         }
       }
     } catch (error) {
@@ -276,6 +290,110 @@ export class RemoteKakao {
     void this.#emitter.emit("deviceConnect", device);
     this.#maybeIdle(device);
     return { device, session };
+  }
+
+  /** Acts on a frame the device sent while its session is open. */
+  #handleFrame(connection: Connection, link: Link, frame: ClientFrame): void {
+    const { device, session } = connection;
+    switch (frame.t) {
+      case "event":
+        this.#handleEvent(connection, frame);
+        break;
+      case "res":
+        device.handleResponse(frame);
+        break;
+      case "req":
+        // Version 1 has no methods that devices can call on Node.
+        this.#reply(session, {
+          t: "res",
+          id: frame.id,
+          ok: false,
+          error: { code: "UNSUPPORTED", message: "Node has no method that devices can call" },
+        });
+        break;
+      case "ping":
+        this.#reply(session, { t: "pong" });
+        break;
+      case "pong":
+        session.resolvePing();
+        break;
+      case "bye":
+        this.#endSession(device, session, undefined);
+        link.close("bye");
+        break;
+      case "hello":
+        // The session already started.
+        break;
+    }
+  }
+
+  /**
+   * Passes an event of the device on to the listeners, unless the device sent it before, and acks it.
+   * The ack means Node received the event, not that the listeners finished.
+   */
+  #handleEvent(connection: Connection, frame: EventFrame): void {
+    const { device, session } = connection;
+    if (typeof frame.id !== "string" || typeof frame.name !== "string") {
+      this.#options.logger.warn("ignored an event with no id or name");
+      return;
+    }
+    session.idleNotified = false;
+    if (device.acceptEvent(frame.id)) {
+      if (frame.name === "message") this.#dispatchMessage(connection, frame);
+      else if (frame.name.includes(":")) this.#dispatchExtensionEvent(connection, frame);
+    }
+    this.#reply(session, { t: "ack", ids: [frame.id] });
+  }
+
+  /** An invalid message is reported and still acked, as the device would otherwise send it forever. */
+  #dispatchMessage({ device, session }: Connection, frame: EventFrame): void {
+    const problem =
+      frame.appInstance === undefined
+        ? "message event has no appInstance"
+        : wireMessageProblem(frame.data);
+    if (problem !== undefined) {
+      const error = new RKError("PROTOCOL_ERROR", `device sent an invalid message: ${problem}`, {
+        device,
+      });
+      this.#reportError({ error, source: "device", event: undefined, device });
+      return;
+    }
+    const appInstance = this.#ensureAppInstance(device, frame.appInstance!);
+    const message = new MessageImpl(appInstance, frame.data as WireMessage, frame.replay === true);
+    this.#dispatch(device, session, "message", message);
+  }
+
+  #dispatchExtensionEvent({ device, session }: Connection, frame: EventFrame): void {
+    const payload: ExtensionEvent<unknown> = {
+      device,
+      appInstance:
+        frame.appInstance === undefined
+          ? undefined
+          : this.#ensureAppInstance(device, frame.appInstance),
+      data: frame.data,
+    };
+    this.#dispatch(device, session, frame.name as EventName, payload as never);
+  }
+
+  /** Emits the event. The session is not idle until its listeners have finished. */
+  #dispatch<E extends EventName>(
+    device: DeviceState,
+    session: SessionState,
+    event: E,
+    payload: EventPayload<E>,
+  ): void {
+    session.openDispatches += 1;
+    void this.#emitter.emit(event, payload).finally(() => {
+      session.openDispatches -= 1;
+      this.#maybeIdle(device);
+    });
+  }
+
+  /** Sends a frame the device does not wait for. A failure means the link is broken, which is handled where the link is read. */
+  #reply(session: SessionState, frame: ServerFrame): void {
+    session.send(frame).catch((error: unknown) => {
+      this.#options.logger.debug(`could not send a ${frame.t} frame: ${String(error)}`);
+    });
   }
 
   /** Records what the hello says about the device and its app instances. */
