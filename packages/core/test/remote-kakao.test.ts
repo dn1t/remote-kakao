@@ -384,6 +384,14 @@ async function start(options: Partial<RemoteKakaoOptions> = {}) {
   return { kakao, connect, connected, disconnected, errors };
 }
 
+/** A started core, and what its transport did. */
+async function startWithState() {
+  const { transport, connect, state } = fakeTransport();
+  const kakao = new RemoteKakao({ transports: [transport], auth: false, logger: false });
+  await kakao.listen();
+  return { kakao, connect, transportState: state };
+}
+
 describe("hello", () => {
   describe("accepted", () => {
     it("answers with a welcome sealed for the device, and starts a session", async () => {
@@ -1173,5 +1181,332 @@ describe("frames of a session", () => {
 
       assert.equal(received().filter((frame) => frame?.t === "pong").length, 1);
     });
+  });
+});
+
+/** The time the clock starts at when the tests of timers mock it. */
+const START = 1_700_000_000_000;
+
+/** Like `connected`, with the timers and the clock mocked from the start. */
+async function connectedWithClock(
+  options: Partial<RemoteKakaoOptions> = {},
+  hello: Record<string, unknown> = {},
+) {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: START });
+  const started = await start(options);
+  const client = fakeClient();
+  const link = started.connect();
+  link.push(client.hello({ caps: ["room.markRead"], ...hello }));
+  await flush();
+  const device = started.kakao.devices.get("phone") as DeviceState;
+  return { ...started, client, link, device };
+}
+
+/** Moves the clock, and lets what the timers started finish. */
+async function tick(ms: number) {
+  mock.timers.tick(ms);
+  await flush();
+}
+
+describe("watching sessions", () => {
+  describe("budget", () => {
+    it("ends the session when the budget runs out", async () => {
+      const { device, link, disconnected } = await connectedWithClock({}, { budget: 5000 });
+
+      await tick(4999);
+      assert.equal(device.status, "online");
+      await tick(1);
+
+      assert.equal(device.status, "offline");
+      assert.deepEqual(disconnected, [{ device, error: undefined }]);
+      assert.deepEqual(link.closed, ["budget expired"]);
+    });
+
+    it("does not end a session again that ended before the budget ran out", async () => {
+      const { link, client, disconnected } = await connectedWithClock({}, { budget: 5000 });
+
+      link.push(client.seal({ t: "bye" }));
+      await flush();
+      await tick(10_000);
+
+      assert.equal(disconnected.length, 1);
+      assert.deepEqual(link.closed, ["bye"]);
+    });
+
+    it("does not end a newer session of the device when an older budget runs out", async () => {
+      const { kakao, connect, disconnected } = await connectedWithClock({}, { budget: 5000 });
+      const second = fakeClient({ salt: Buffer.alloc(16, 2) });
+      connect().push(second.hello());
+      await flush();
+
+      await tick(5000);
+
+      assert.equal(kakao.devices.get("phone")?.status, "online");
+      assert.equal(disconnected.length, 1);
+    });
+  });
+
+  describe("heartbeat", () => {
+    it("ends a session without a budget that sends nothing for the heartbeat timeout", async () => {
+      const { device, link, disconnected } = await connectedWithClock();
+
+      await tick(29_999);
+      assert.equal(device.status, "online");
+      await tick(1);
+
+      assert.equal(device.status, "offline");
+      assert.equal(disconnected.length, 1);
+      assert.ok(isRKError(disconnected[0]?.error, "TIMEOUT"));
+      assert.deepEqual(link.closed, ["heartbeat timeout"]);
+    });
+
+    it("uses the heartbeat timeout of the options", async () => {
+      const { device } = await connectedWithClock({ heartbeat: { interval: 1000, timeout: 2500 } });
+
+      await tick(2499);
+      assert.equal(device.status, "online");
+      await tick(1);
+
+      assert.equal(device.status, "offline");
+    });
+
+    it("starts the timeout over whenever a frame arrives", async () => {
+      const { device, link, client } = await connectedWithClock();
+
+      await tick(20_000);
+      link.push(client.seal({ t: "ping" }));
+      await flush();
+      await tick(20_000);
+      assert.equal(device.status, "online");
+      await tick(10_000);
+
+      assert.equal(device.status, "offline");
+    });
+
+    it("is not kept alive by bytes that are not frames of the session", async () => {
+      const { device, link, client } = await connectedWithClock();
+      const replay = client.seal({ t: "ping" });
+      link.push(replay);
+      await flush();
+
+      await tick(20_000);
+      link.push(Buffer.from("junk"));
+      link.push(replay);
+      link.push(fakeClient({ token: "other" }).seal({ t: "ping" }));
+      await flush();
+      await tick(10_000);
+
+      assert.equal(device.status, "offline");
+    });
+
+    it("does not time out a session with a budget", async () => {
+      const { device } = await connectedWithClock({}, { budget: 200_000 });
+
+      await tick(100_000);
+
+      assert.equal(device.status, "online");
+    });
+
+    it("does not end a session again that ended earlier", async () => {
+      const { link, client, disconnected } = await connectedWithClock();
+
+      link.push(client.seal({ t: "bye" }));
+      await flush();
+      await tick(60_000);
+
+      assert.equal(disconnected.length, 1);
+      assert.deepEqual(link.closed, ["bye"]);
+    });
+  });
+
+  describe("hello", () => {
+    it("closes a link that sends no hello in time", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: START });
+      const { connect } = await start();
+      const link = connect();
+
+      await tick(14_999);
+      assert.deepEqual(link.closed, []);
+      await tick(1);
+
+      assert.deepEqual(link.closed, ["hello timeout"]);
+    });
+
+    it("is not kept open by frames that are not a hello", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: START });
+      const { connect } = await start();
+      const link = connect();
+
+      await tick(10_000);
+      link.push(fakeClient({ token: "other" }).hello());
+      await flush();
+      await tick(5000);
+
+      assert.deepEqual(link.closed, ["hello timeout"]);
+    });
+
+    it("leaves a link alone that has started a session", async () => {
+      const { link } = await connectedWithClock();
+
+      await tick(20_000);
+
+      assert.deepEqual(link.closed, []);
+    });
+
+    it("does not close a link a second time that was refused", async () => {
+      mock.timers.enable({ apis: ["setTimeout", "Date"], now: START });
+      const { connect } = await start();
+      const link = connect();
+      link.push(fakeClient().hello({ v: 9 }));
+      await flush();
+
+      await tick(60_000);
+
+      assert.deepEqual(link.closed, ["PROTOCOL_MISMATCH"]);
+    });
+  });
+});
+
+describe("close", () => {
+  it("says goodbye to the devices, closes their links, and tells with deviceDisconnect", async () => {
+    const { kakao, link, client, disconnected, device } = await connected();
+
+    await kakao.close();
+
+    const frames = client.received(link).map((opened) => opened?.frame);
+    assert.deepEqual(frames.at(-1), { t: "bye", reason: "server closing" });
+    assert.deepEqual(link.closed, ["server closing"]);
+    assert.deepEqual(disconnected, [{ device, error: undefined }]);
+    assert.equal(device.status, "offline");
+  });
+
+  it("stops the transports", async () => {
+    const { kakao, transportState } = await startWithState();
+
+    await kakao.close();
+
+    assert.equal(transportState.closed, true);
+  });
+
+  it("rejects the requests that are still waiting with CLOSED", async () => {
+    const { kakao } = await connected();
+    const call = kakao.room(REF_OF_PHONE).markRead();
+    const rejected = assert.rejects(call, (error) => isRKError(error, "CLOSED"));
+
+    await kakao.close();
+
+    await rejected;
+  });
+
+  it("makes wait reject with CLOSED, and calls no listener any more", async () => {
+    const { kakao } = await connected();
+    const waiting = assert.rejects(kakao.wait("message"), (error) => isRKError(error, "CLOSED"));
+
+    await kakao.close();
+
+    await waiting;
+    await assert.rejects(kakao.wait("message"), (error) => isRKError(error, "CLOSED"));
+  });
+
+  it("does the same when called again, and gives the same promise", async () => {
+    const { kakao, link } = await connected();
+
+    const first = kakao.close();
+    const second = kakao.close();
+    await Promise.all([first, second]);
+
+    assert.equal(first, second);
+    assert.deepEqual(link.closed, ["server closing"]);
+  });
+
+  it("works as asyncDispose", async () => {
+    const { kakao, device } = await connected();
+
+    await kakao[Symbol.asyncDispose]();
+
+    assert.equal(device.status, "offline");
+  });
+
+  it("refuses to listen again, and closes links that come in", async () => {
+    const { kakao, connect } = await connected();
+    await kakao.close();
+
+    await assert.rejects(kakao.listen(), (error) => isRKError(error, "CLOSED"));
+    assert.deepEqual(connect().closed, ["closed"]);
+  });
+
+  it("waits for a listener that is running, and returns when it finishes", async () => {
+    const { kakao, link, client } = await connected();
+    let finish!: () => void;
+    let finished = false;
+    kakao.on("message", async () => {
+      await new Promise<void>((resolve) => (finish = resolve));
+      finished = true;
+    });
+    link.push(client.messageEvent("e1"));
+    await flush();
+
+    let closed = false;
+    const closing = kakao.close().then(() => (closed = true));
+    await flush();
+    assert.equal(closed, false);
+    finish();
+    await closing;
+
+    assert.equal(finished, true);
+  });
+
+  it("stops waiting for a listener that does not finish after the timeout", async () => {
+    const { kakao, link, client } = await connectedWithClock();
+    kakao.on("message", () => new Promise<void>(() => {}));
+    link.push(client.messageEvent("e1"));
+    await flush();
+
+    const closing = kakao.close({ timeout: 100 });
+    await flush();
+    mock.timers.tick(100);
+
+    await closing;
+  });
+
+  it("refuses a timeout that a timer can't wait for", async () => {
+    const { kakao } = await connected();
+
+    await assert.rejects(kakao.close({ timeout: -1 }), RangeError);
+  });
+
+  it("closes the links that do not end by themselves", async () => {
+    const { kakao, connect } = await start();
+    const silent = connect();
+
+    await kakao.close();
+
+    assert.deepEqual(silent.closed, ["closed"]);
+  });
+});
+
+describe("listen with a signal", () => {
+  it("rejects without starting anything when the signal is already aborted", async () => {
+    const { transport, state } = fakeTransport();
+    const kakao = new RemoteKakao({ transports: [transport], auth: false, logger: false });
+    const controller = new AbortController();
+    controller.abort(new Error("stop"));
+
+    await assert.rejects(kakao.listen({ signal: controller.signal }), { message: "stop" });
+
+    assert.equal(state.listening, false);
+  });
+
+  it("closes when the signal is aborted", async () => {
+    const { transport, state } = fakeTransport();
+    const kakao = new RemoteKakao({ transports: [transport], auth: false, logger: false });
+    const controller = new AbortController();
+    await kakao.listen({ signal: controller.signal });
+
+    controller.abort();
+    await flush();
+
+    assert.equal(state.closed, true);
+    await assert.rejects(kakao.wait("message"), (error) => isRKError(error, "CLOSED"));
   });
 });
