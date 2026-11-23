@@ -1,4 +1,12 @@
-import type { EventName, EventPayload, Listener, ListenerOptions, Unsubscribe } from "./types.ts";
+import { RKError } from "./errors.ts";
+import type {
+  EventName,
+  EventPayload,
+  Listener,
+  ListenerOptions,
+  Unsubscribe,
+  WaitOptions,
+} from "./types.ts";
 
 interface Entry {
   listener: (payload: unknown) => unknown;
@@ -20,6 +28,9 @@ export class Emitter {
   readonly #hooks: EmitterHooks;
   readonly #listeners = new Map<EventName, Set<Entry>>();
   readonly #running = new Set<Promise<void>>();
+  /** Ends every `wait` that is pending. */
+  readonly #closers = new Set<() => void>();
+  #closed = false;
 
   constructor(hooks: EmitterHooks) {
     this.#hooks = hooks;
@@ -78,9 +89,75 @@ export class Emitter {
     return Promise.all(started).then(() => {});
   }
 
+  /**
+   * Resolves with the next payload of the event that passes `filter`.
+   * Rejects with `TIMEOUT` after `timeout` ms, with `ABORTED` when `signal` is aborted, and with
+   * `CLOSED` if the emitter is closed, now or while waiting.
+   * If `filter` throws, rejects with that error.
+   */
+  wait<E extends EventName>(
+    event: E,
+    options?: WaitOptions<EventPayload<E>>,
+  ): Promise<EventPayload<E>> {
+    if (this.#closed) return Promise.reject(closedError());
+    const { filter, timeout, signal } = options ?? {};
+
+    return new Promise<EventPayload<E>>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let finished = false;
+
+      const finish = (settle: () => void) => {
+        if (finished) return;
+        finished = true;
+        off();
+        this.#closers.delete(onClose);
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        settle();
+      };
+      const onClose = () => finish(() => reject(closedError()));
+      const onAbort = () => {
+        const error = new RKError("ABORTED", "wait aborted", { cause: signal?.reason });
+        finish(() => reject(error));
+      };
+
+      const off = this.on(event, (payload) => {
+        try {
+          if (filter && !filter(payload)) return;
+        } catch (error) {
+          finish(() => reject(error));
+          return;
+        }
+        finish(() => resolve(payload));
+      });
+      this.#closers.add(onClose);
+
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (timeout !== undefined) {
+        const error = new RKError("TIMEOUT", `no "${event}" within ${timeout}ms`);
+        timer = setTimeout(() => finish(() => reject(error)), timeout);
+      }
+    });
+  }
+
   /** Waits until every async listener started so far has settled. */
   async settle(): Promise<void> {
     while (this.#running.size > 0) await Promise.all(this.#running);
+  }
+
+  /**
+   * Rejects the waits that are pending with `CLOSED`, and so will every wait from now on.
+   * Removes all listeners.
+   */
+  close(): void {
+    this.#closed = true;
+    for (const close of Array.from(this.#closers)) close();
+    this.#closers.clear();
+    this.#listeners.clear();
   }
 
   #add(
@@ -116,6 +193,10 @@ export class Emitter {
       // A failing hook has nobody left to tell, and must not reach the process.
     }
   }
+}
+
+function closedError(): RKError {
+  return new RKError("CLOSED", "RemoteKakao is closed");
 }
 
 /** Makes the function that `on` returns: it does its work once, and can be used with `using`. */
