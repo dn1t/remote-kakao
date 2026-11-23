@@ -1,4 +1,4 @@
-import { createCipheriv, hkdfSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, hkdfSync } from "node:crypto";
 
 import type { AnyFrame, DeviceId } from "./protocol.ts";
 
@@ -16,6 +16,7 @@ const VERSION_SEALED = 0x01;
 const KEY_LENGTH = 32;
 const SALT_LENGTH = 16;
 const COUNTER_LENGTH = 8;
+const TAG_LENGTH = 16;
 const NONCE_LENGTH = 12;
 const MAX_DEVICE_ID_LENGTH = 255;
 const INFO_UP = Buffer.from("rk wire v1 up");
@@ -88,4 +89,134 @@ function nonce(counter: bigint): Buffer {
   const bytes = Buffer.alloc(NONCE_LENGTH);
   bytes.writeBigUInt64BE(counter, NONCE_LENGTH - COUNTER_LENGTH);
   return bytes;
+}
+
+/** Part of a frame the receiver can read without decrypting. */
+export interface FrameHeader {
+  /** `false` for a plain frame (`auth: false`). */
+  sealed: boolean;
+  direction: Direction;
+  deviceId: DeviceId;
+  /** Empty for a plain frame. */
+  salt: Uint8Array;
+}
+
+/** Frame read from bytes. */
+export interface OpenedFrame extends FrameHeader {
+  /** `0n` for a plain frame, which has no counter. */
+  counter: bigint;
+  frame: AnyFrame;
+}
+
+/**
+ * Reads the device, direction and salt of a frame without decrypting it.
+ * The receiver needs them to pick the key before it can open the frame.
+ * Returns `undefined` if the bytes are not a frame.
+ */
+export function peekHeader(bytes: Uint8Array): FrameHeader | undefined {
+  const header = readHeader(view(bytes));
+  if (!header) return undefined;
+  const { sealed, direction, deviceId, salt } = header;
+  return { sealed, direction, deviceId, salt };
+}
+
+/**
+ * Reads a frame from bytes. Returns `undefined` if the bytes are not a valid frame,
+ * or, if sealed, were changed or sealed with another key.
+ *
+ * Pass the key of the direction the frame came in for a sealed frame, or no key for a plain frame.
+ * A frame of the other kind is refused, so a plain frame cannot slip in where a sealed one is due.
+ * It throws if the key is not 32 bytes.
+ */
+export function openFrame(bytes: Uint8Array, key?: Uint8Array): OpenedFrame | undefined {
+  if (key !== undefined && key.length !== KEY_LENGTH) {
+    throw new RangeError(`key must be ${KEY_LENGTH} bytes`);
+  }
+  const buf = view(bytes);
+  const header = readHeader(buf);
+  if (!header || header.sealed !== (key !== undefined)) return undefined;
+  const { sealed, direction, deviceId, salt, end } = header;
+
+  if (key === undefined) {
+    const frame = parseFrame(buf.subarray(end));
+    return frame && { sealed, direction, deviceId, salt, counter: 0n, frame };
+  }
+
+  const cipherStart = end + COUNTER_LENGTH;
+  if (buf.length < cipherStart + TAG_LENGTH) return undefined;
+  const counter = buf.readBigUInt64BE(end);
+  let json: Buffer;
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", key, nonce(counter));
+    decipher.setAAD(buf.subarray(0, cipherStart));
+    decipher.setAuthTag(buf.subarray(buf.length - TAG_LENGTH));
+    const plain = decipher.update(buf.subarray(cipherStart, buf.length - TAG_LENGTH));
+    json = Buffer.concat([plain, decipher.final()]);
+  } catch {
+    return undefined;
+  }
+  const frame = parseFrame(json);
+  return frame && { sealed, direction, deviceId, salt, counter, frame };
+}
+
+/** Frame types the receiver knows. A frame of any other type is refused. */
+const FRAME_TYPES: Record<AnyFrame["t"], true> = {
+  hello: true,
+  welcome: true,
+  reject: true,
+  idle: true,
+  ping: true,
+  pong: true,
+  bye: true,
+  event: true,
+  ack: true,
+  req: true,
+  res: true,
+};
+
+const utf8 = new TextDecoder("utf-8", { fatal: true });
+
+function view(bytes: Uint8Array): Buffer {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+interface ParsedHeader extends FrameHeader {
+  /** Where the header ends in the bytes. */
+  end: number;
+}
+
+function readHeader(buf: Buffer): ParsedHeader | undefined {
+  if (buf.length < 3) return undefined;
+  const version = buf[0]!;
+  const direction = buf[1]!;
+  const idEnd = 3 + buf[2]!;
+  if (version !== VERSION_PLAIN && version !== VERSION_SEALED) return undefined;
+  if (direction !== Direction.Up && direction !== Direction.Down) return undefined;
+  if (buf.length < idEnd) return undefined;
+  let deviceId: string;
+  try {
+    deviceId = utf8.decode(buf.subarray(3, idEnd));
+  } catch {
+    return undefined;
+  }
+
+  if (version === VERSION_PLAIN) {
+    return { sealed: false, direction, deviceId, salt: new Uint8Array(0), end: idEnd };
+  }
+  const end = idEnd + SALT_LENGTH;
+  if (buf.length < end) return undefined;
+  const salt = new Uint8Array(buf.subarray(idEnd, end));
+  return { sealed: true, direction, deviceId, salt, end };
+}
+
+function parseFrame(json: Uint8Array): AnyFrame | undefined {
+  try {
+    const value: unknown = JSON.parse(utf8.decode(json));
+    if (typeof value !== "object" || value === null) return undefined;
+    const type = (value as { t?: unknown }).t;
+    if (typeof type !== "string" || !Object.hasOwn(FRAME_TYPES, type)) return undefined;
+    return value as AnyFrame;
+  } catch {
+    return undefined;
+  }
 }
